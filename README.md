@@ -25,18 +25,23 @@ CC Memory 是一个 Electron 桌面应用，让你用可视化的方式管理 Cl
 
 ## 截图 / Screenshots
 
-| 主界面 · 暗色 · 中文 | 加载规则说明 · 中文 |
+| 主界面 · 暗色 · 中文 | 配色主题 · 中文 |
 |---|---|
-| <img src="docs/screenshots/hero-dark-zh.png" width="560" alt="主界面 暗色 中文"> | <img src="docs/screenshots/about-zh.png" width="560" alt="加载规则 中文"> |
+| <img src="docs/screenshots/hero-dark-zh.png" width="560" alt="主界面 暗色 中文"> | <img src="docs/screenshots/themes-zh.png" width="560" alt="配色主题"> |
 
 | 亮色主题 · 中文 | 英文界面 | Session JSONL |
 |---|---|---|
 | <img src="docs/screenshots/hero-light-zh.png" width="380" alt="亮色主题"> | <img src="docs/screenshots/hero-dark-en.png" width="380" alt="英文界面"> | <img src="docs/screenshots/session-jsonl.png" width="380" alt="Session JSONL"> |
 
+| 加载规则说明 · 中文 |
+|---|
+| <img src="docs/screenshots/about-zh.png" width="560" alt="加载规则 中文"> |
+
 ## 功能 / Features
 
 - 🌐 **中英文切换** —— 一键在 中文 / English 之间切换，界面与加载规则说明随之本地化
-- 🌓 **暗 / 亮主题** —— 跨平台主题切换（macOS / Windows / Linux），自动记忆你的选择
+- 🎨 **配色主题** —— 六套配色（靛蓝 / 青碧 / 紫罗兰 / 琥珀 / 玫红 / 纯灰）× 暗 / 亮模式，共 12 套取值，选择自动记忆
+- 📐 **按屏自动缩放** —— 按显示器像素密度自动设定窗口缩放，窗口移到另一块屏时自动重算，两块屏观感一致
 - 🗂️ **五类记忆文件** —— Managed / User / Project / Local / Memory，分类清晰，一目了然
 - ✏️ **在线编辑** —— 直接在应用里修改 `CLAUDE.md` 与记忆文件，保存即写入磁盘
 - 📜 **加载规则说明** —— 每种文件的加载路径、优先级与合并规则都有清晰说明
