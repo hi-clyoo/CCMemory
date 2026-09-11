@@ -9,8 +9,9 @@ import {
   getTrafficLightPositionForZoom,
   WINDOW_ZOOM_FACTOR_CHANGED_CHANNEL,
 } from '@shared/constants';
+import { computeAutoZoomFactor } from '@shared/utils/displayScale';
 import { createLogger } from '@shared/utils/logger';
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, screen } from 'electron';
 import { existsSync } from 'fs';
 import { totalmem } from 'os';
 import { join } from 'path';
@@ -155,6 +156,42 @@ function syncTrafficLightPosition(win: BrowserWindow): void {
   win.webContents.send(WINDOW_ZOOM_FACTOR_CHANGED_CHANNEL, zoomFactor);
 }
 
+/**
+ * Display the window was last scaled for. Guards against redundant work: `move`
+ * fires continuously during a drag, and re-applying an identical zoom would
+ * interrupt text selection and CodeMirror scrolling for no reason.
+ */
+let appliedDisplayId: number | null = null;
+let autoZoomTimer: NodeJS.Timeout | null = null;
+
+/** Scale the window to match the density of the display it currently sits on. */
+function applyAutoZoom(win: BrowserWindow, force = false): void {
+  if (win.isDestroyed()) return;
+  const { x, y, width, height } = win.getBounds();
+  const display = screen.getDisplayNearestPoint({
+    x: x + Math.floor(width / 2),
+    y: y + Math.floor(height / 2),
+  });
+  if (!force && display.id === appliedDisplayId) return;
+  appliedDisplayId = display.id;
+
+  const factor = computeAutoZoomFactor(display.size);
+  logger.info(
+    `Auto zoom ${factor}x for display ${display.id} (${display.size.width}x${display.size.height})`
+  );
+  if (win.webContents.getZoomFactor() !== factor) win.webContents.setZoomFactor(factor);
+  syncTrafficLightPosition(win);
+}
+
+/** Debounced apply — dragging a window across monitors emits a burst of events. */
+function scheduleAutoZoom(): void {
+  if (autoZoomTimer) clearTimeout(autoZoomTimer);
+  autoZoomTimer = setTimeout(() => {
+    autoZoomTimer = null;
+    if (mainWindow && !mainWindow.isDestroyed()) applyAutoZoom(mainWindow);
+  }, 250);
+}
+
 function createWindow(): void {
   const isMac = process.platform === 'darwin';
   const iconPath = isMac ? undefined : getWindowIconPath();
@@ -174,14 +211,20 @@ function createWindow(): void {
 
   if (process.env.NODE_ENV === 'development') {
     void mainWindow.loadURL(`http://localhost:${DEV_SERVER_PORT}`);
-    mainWindow.webContents.openDevTools();
   } else {
     void mainWindow.loadFile(getRendererIndexPath());
   }
 
   mainWindow.webContents.on('did-finish-load', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) syncTrafficLightPosition(mainWindow);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      // Chromium restores a per-origin zoom level on navigation, which would
+      // otherwise undo the display-derived zoom, so re-assert it on every load.
+      applyAutoZoom(mainWindow, true);
+    }
   });
+
+  mainWindow.on('move', scheduleAutoZoom);
+  mainWindow.on('resize', scheduleAutoZoom);
 
   mainWindow.webContents.on('did-fail-load', (_e, code, desc, url, isMain) => {
     if (isMain) logger.error(`Renderer load failed (${code}): ${desc} - ${url}`);
@@ -210,6 +253,7 @@ function createWindow(): void {
 
   mainWindow.on('closed', () => {
     mainWindow = null;
+    appliedDisplayId = null;
     if (notificationManager) notificationManager.setMainWindow(null);
   });
 
@@ -229,6 +273,7 @@ void app.whenReady().then(async () => {
     app.setLoginItemSettings({ openAtLogin: config.general.launchAtLogin });
     setMacDockIcon();
     createWindow();
+    screen.on('display-metrics-changed', scheduleAutoZoom);
     notificationManager.on('notification-clicked', () => {
       if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
     });
