@@ -49,3 +49,5 @@ claude-dev.tools/*
 eslint-fix/
 remotion/*release/
 win-unpacked/
+.gstack/
+.superpowers/
