@@ -26,6 +26,8 @@ export default defineConfig([
     '*.config.cjs',
     '*.config.ts',
     'out/**',
+    // Static assets copied verbatim into the renderer bundle — not source.
+    'src/renderer/public/**',
   ]),
 
   // Base ESLint recommended rules
