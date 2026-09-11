@@ -1,0 +1,1051 @@
+/* PokeChat —— 组件选择反馈对话（零依赖，原生 JS）
+ * 与 Vibe-Astock 项目版 100% 对齐的功能 + 玻璃风 UI
+ *
+ * 用法：<script src="pokechat.js"></script>
+ *       PokeChat.init({ endpoint: "http://127.0.0.1:8123" });  // 可选：配后端后发送给 AI 并轮询回复
+ *
+ * 功能（对齐项目版）：
+ *   1. 🎯 选择模式：悬停层级高亮（上级虚线 / 最内层实线）→ 点击 → 备注弹窗
+ *   2. 备注弹窗：Enter 加入队列 / Shift+Enter 换行 / Ctrl+Enter 直接发送 /
+ *      Home-End 行级 / Ctrl+Home-End 文档级 / IME 输入法保护
+ *   3. 队列：常驻悬浮（localStorage 持久化），条目可编辑，批量发送
+ *   4. 对话面板：IM（左 AI 回复/右用户消息 + 状态标签），左侧索引（直接/组件分组），
+ *      底部直接发消息，自动滚动到最新，完整回复展示
+ *   5. 任务状态：发送后 等待调度/处理中/已完成 三态
+ */
+(function (global) {
+  "use strict";
+
+  var DEFAULT_ENDPOINT = "";
+  var QUEUE_KEY = "pokechat-queue";
+  var STATUS_KEY = "pokechat-status";
+
+  // API 前缀可配（2026-08-22）：开源 server.py 用 /api/feedback；
+  // 接入 vibe-astock 本地后端（/api/ui-feedback 系）时传 apiPrefix: "/api/ui-feedback"
+  var cfg = { endpoint: DEFAULT_ENDPOINT, apiPrefix: "/api/feedback" };
+  // 2026-08-22 修复：去掉多余斜杠——api("/") 曾拼出 /api/ui-feedback/ 尾斜杠 → POST 405 发送失败
+  function api(path) {
+    var p = (path || "").replace(/^\/+/, "").replace(/\/+$/, "");
+    return (cfg.endpoint + cfg.apiPrefix).replace(/\/+$/, "") + (p ? "/" + p : "");
+  }
+  // 是否配了后端：endpoint 或 apiPrefix 任一存在即视为后端模式。
+  // ⚠️ 2026-08-22 修复：本地同源接入 endpoint="" 时，旧判断 if (cfg.endpoint) 为空字符串假值，
+  // 导致状态轮询/历史加载/发送全走"本地模式"——用户反馈"没有显示历史的数据"
+  function hasBackend() { return !!(cfg.endpoint || cfg.apiPrefix); }
+  var queue = [];
+  var picking = false;
+  var picked = null;
+  var note = "";
+  var directMsg = "";
+  var status = { pending: [], processing: [], done: [] };
+  var qOpen = false;      // 队列面板（大弹窗）
+  var editing = null;     // 正在编辑的队列条目
+  var selectedEl = null;
+  var sub = {};
+
+  /* ================= 工具 ================= */
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function el(tag, cls, html) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (html != null) n.innerHTML = html;
+    return n;
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function loadQueue() {
+    try { queue = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]") || []; } catch (e) { queue = []; }
+    // 可选：从后端恢复队列（配 queueApi 时，如 vibe-astock 的 /api/ui-feedback/queue，2026-08-22）
+    if (cfg.queueApi && hasBackend()) {
+      fetch(cfg.endpoint + cfg.queueApi).then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && Array.isArray(d.items) && d.items.length) { queue = d.items; saveQueue(); renderFloating(); }
+        }).catch(function () {});
+    }
+  }
+  function saveQueue() {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(queue));
+    // 可选：后端持久化（配 queueApi 时）
+    if (cfg.queueApi && hasBackend()) {
+      fetch(cfg.endpoint + cfg.queueApi, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: queue }) })
+        .catch(function () {});
+    }
+  }
+  function post(url, body, cb) {
+    fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); }).then(cb).catch(function () {});
+  }
+
+  /* ================= 玻璃风样式（100% 对齐项目 index.css token，2026-08-22） ================= */
+  // 项目暗色主题：背景 hsl(222 47% 6%)、卡 hsl(222 40% 9%)、主色暖橙红 hsl(15 89% 56%)≈#F35D2B、
+  // glass 渐变 + 发丝边框 + 内高光 + blur(14px) + 圆角 1rem
+  var GLASS_CSS = [
+    ":root { --pc-bg:hsl(222 47% 6%); --pc-card:hsl(222 40% 9%); --pc-card-2:rgba(255,255,255,.09);",
+    "  --pc-border:rgba(255,232,214,.16); --pc-primary:hsl(15 89% 56%);",
+    "  --pc-text:hsl(210 30% 94%); --pc-muted:hsl(215 20% 76%); --pc-muted-2:hsla(215,20%,76%,.6);",
+    "  --pc-danger:hsl(0 74% 60%); --pc-warn:hsl(38 92% 55%); --pc-green:hsl(152 55% 46%);",
+    "  --pc-hi:rgba(255,255,255,.08); --pc-radius:1rem; }",
+    // 2026-08-22 主题内容区不透明方案（用户要求）：内容区（列表逐条/气泡/按钮底）
+    // 文字小需更好阅读 → 用更实的半透明白；标题/玻璃层保持低透明度
+    "[data-pokechat] { --pc-content:rgba(255,255,255,.13); --pc-content-strong:rgba(255,255,255,.18);",
+    "  --pc-content-border:rgba(255,255,255,.24); }",
+    // 2026-08-22 整体可读性优化：glass 底色加深（白色叠加 .10/.05）+ 保留毛玻璃 blur + 发丝边框；
+    // muted 色提亮（62%→76%）——之前文字在透底上对比度不足看不清
+    "[data-pokechat] { font-family: system-ui, sans-serif; color: var(--pc-text); }",
+    "[data-pokechat] .pc-glass { background-image: linear-gradient(162deg, rgba(255,255,255,.10), rgba(255,255,255,.05));",
+    "  border:1px solid var(--pc-border); border-radius:var(--pc-radius);",
+    "  box-shadow: 0 12px 30px rgba(0,0,0,.35), inset 0 1px 0 var(--pc-hi);",
+    "  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }",
+    "[data-pokechat] .pc-btn { background: var(--pc-card-2); color: var(--pc-text); border:1px solid var(--pc-border);",
+    "  border-radius:9px; padding:6px 12px; cursor:pointer; font-size:13px; transition: all .15s; }",
+    "[data-pokechat] .pc-btn:hover { background: rgba(255,255,255,.14); }",
+    "[data-pokechat] .pc-btn-primary { background: var(--pc-primary); color:hsl(222 47% 6%); font-weight:600; border-color:transparent; }",
+    "[data-pokechat] .pc-btn-primary:hover { opacity:.9; }",
+    "[data-pokechat] .pc-input, [data-pokechat] .pc-textarea { background: rgba(255,255,255,.08); color: var(--pc-text);",
+    "  border:1px solid var(--pc-border); border-radius:9px; padding:8px 10px; font-size:13px; width:100%;",
+    "  box-sizing:border-box; outline:none; }",
+    "[data-pokechat] .pc-input:focus, [data-pokechat] .pc-textarea:focus { border-color: var(--pc-primary); }",
+    "[data-pokechat] .pc-modal { position:fixed; inset:0; z-index:2147483000; background:rgba(0,0,0,.55);",
+    "  display:flex; align-items:center; justify-content:center; padding:20px; }",
+    // ⚠️ 2026-08-22 修复：弹窗的 hidden 加在自身（如 data-pokechat='queue' 元素），
+    // 原选择器 [data-pokechat] .hidden 是后代选择器不匹配自身 + 弹窗内联 display:flex 覆盖 → 关不掉
+    "[data-pokechat].hidden, [data-pokechat] .hidden { display:none !important; }",
+    // 2026-08-22 修复：badge 文字太暗看不清 → 亮色纯文字 + 稍实背景
+    "[data-pokechat] .pc-badge { border-radius:6px; padding:1px 6px; font-size:10px; font-weight:700; }",
+    "[data-pokechat] .pc-badge-done { background:rgba(52,211,153,.25); color:#6ee7b7; }",
+    "[data-pokechat] .pc-badge-proc { background:rgba(251,191,36,.25); color:#fcd34d; }",
+    "[data-pokechat] .pc-badge-wait { background:rgba(148,163,184,.25); color:#cbd5e1; }",
+    ".pokechat-picking, .pokechat-picking * { cursor: crosshair !important; }",
+    ".pokechat-picking *:hover { outline:1px dashed var(--pc-primary) !important; outline-offset:1px; }",
+    ".pokechat-picking *:hover:not(:has(*:hover)) { outline:2px solid var(--pc-primary) !important; outline-offset:1px; }",
+    // 2026-08-22（155346/160136/162645）：canvas 在部分 WebKit 下 outline/box-shadow 都不渲染，
+    // 改在其**父容器**上画实线（:has(> canvas:hover)），canvas 自身规则保留兜底
+    ".pokechat-picking canvas:hover { outline:2px solid var(--pc-primary) !important; outline-offset:1px; }",
+    ".pokechat-picking div:has(> canvas:hover) { outline:2px solid var(--pc-primary) !important; outline-offset:1px; }",
+  ].join("\n");
+
+  /* ================= 选择模式（层级高亮） ================= */
+  // 2026-08-23（1105xx）：向上找最近的 data-name 属性（组件标识，反馈里可见）
+  function pickName(node) {
+    var el = node;
+    while (el && el.getAttribute) {
+      var dn = el.getAttribute("data-name");
+      if (dn) return dn;
+      el = el.parentElement;
+    }
+    return "";
+  }
+  function pickInfo(node) {
+    var cls = Array.prototype.slice.call(node.classList || []).slice(0, 3).join(".");
+    var txt = (node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 60);
+    return {
+      tag: node.tagName.toLowerCase(),
+      selector: node.tagName.toLowerCase() + (node.id ? "#" + node.id : "") + (cls ? "." + cls : ""),
+      text: txt,
+      name: pickName(node),
+    };
+  }
+  function clearOutline() {
+    if (selectedEl) { selectedEl.style.outline = ""; selectedEl.style.outlineOffset = ""; selectedEl = null; }
+  }
+  function startPicking() {
+    if (picking) return;
+    picking = true;
+    document.body.classList.add("pokechat-picking");
+    document.addEventListener("mouseover", onOver, true);
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("contextmenu", onCtx, true);
+    document.addEventListener("keydown", onPickKey, true);
+    if (window.__pcRenderPickIcon) window.__pcRenderPickIcon();  // 图标切换 X
+  }
+  function stopPicking() {
+    if (!picking) return;
+    picking = false;
+    document.body.classList.remove("pokechat-picking");
+    document.removeEventListener("mouseover", onOver, true);
+    document.removeEventListener("click", onClick, true);
+    document.removeEventListener("contextmenu", onCtx, true);
+    document.removeEventListener("keydown", onPickKey, true);
+    clearOutline();
+    renderFloating();
+    if (window.__pcRenderPickIcon) window.__pcRenderPickIcon();  // 图标切回鼠标指针
+  }
+  // 2026-08-22：PokeChat 自己的 UI（对话窗口/弹窗/悬浮区/控制按钮）都可以被选择反馈，
+  // 不做排除——任何元素都可点选
+  function onOver(e) {
+    var t = e.target;
+    if (!t) return;
+    clearOutline();
+    selectedEl = t;
+    // 2026-08-22（183848）：内联样式必须带 !important——否则被 CSS 的
+    // .pokechat-picking *:hover 虚线（!important）覆盖，canvas 永远只有虚线。
+    // 颜色用主题主色 var(--pc-primary)（跟随 IM 主题）。
+    t.style.outline = "2px solid var(--pc-primary) !important";
+    t.style.outlineOffset = "1px !important";
+  }
+  function onClick(e) {
+    var t = e.target;
+    if (!t) return;
+    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+    var info = pickInfo(t);
+    stopPicking();
+    selectedEl = t;
+    t.style.outline = "2px solid #22c55e";
+    openNoteDialog(info);
+  }
+  function onCtx(e) { e.preventDefault(); stopPicking(); }
+  function onPickKey(e) {
+    if (e.key === "Escape") stopPicking();
+  }
+  // 全局 Ctrl+F 启动/退出选择模式（对齐项目版；拦截浏览器查找，2026-08-22）
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "f" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
+      e.preventDefault();
+      if (picking) stopPicking(); else startPicking();
+    }
+  }, true);
+
+  /* ================= 备注弹窗（对齐项目版） ================= */
+  // 弹窗互斥（2026-08-22）：React 原版是条件渲染天然互斥，PokeChat 常驻 DOM + hidden
+  // 切换必须手动互斥——打开任一弹窗先关掉其他弹窗，避免叠开
+  function closeAllDialogs(except) {
+    [["note", "note"], ["edit", "edit"], ["queue", "queue"]].forEach(function (pair) {
+      if (pair[1] !== except) {
+        var m = $("[data-pokechat='" + pair[0] + "']");
+        if (m) m.classList.add("hidden");
+      }
+    });
+  }
+  function openNoteDialog(info) {
+    picked = info;
+    note = "";
+    // 2026-08-22 修复：IM 窗口开着时使用组件反馈，弹窗会自动消失——不能再 closeAllDialogs("note")
+    // 关掉 queue（IM 窗口）。只关编辑弹窗，note 叠加在 IM 之上（z-index 3002）
+    var editDlg = $("[data-pokechat='edit']");
+    if (editDlg) editDlg.classList.add("hidden");
+    var m = $("[data-pokechat='note']");
+    $("[data-pc-path]", m).textContent = location.pathname + location.search;
+    $("[data-pc-sel]", m).textContent = info.selector;
+    // 2026-08-23（1105xx）：弹窗显示组件 data-name（无则隐藏该行）
+    var nmEl = $("[data-pc-name]", m);
+    if (nmEl) { nmEl.textContent = info.name || ""; nmEl.closest("div").style.display = info.name ? "" : "none"; }
+    $("[data-pc-txt]", m).textContent = info.text || "（无文本）";
+    var ta = $("[data-pc-note]", m);
+    ta.value = "";
+    note = "";
+    m.classList.remove("hidden");
+    // 打开时同步按钮 disabled（备注为空禁用提交）
+    var add = $("[data-pc-add]", m), sd = $("[data-pc-sendd]", m);
+    if (add) { add.disabled = true; add.style.opacity = ".5"; }
+    if (sd) { sd.disabled = true; sd.style.opacity = ".5"; }
+    ta.focus();
+  }
+  function closeNoteDialog() { $("[data-pokechat='note']").classList.add("hidden"); picked = null; clearOutline(); }
+  function addToQueue() {
+    // 2026-08-22（143013）：从备注弹窗 DOM 读值，不依赖共享全局 note 变量
+    var ta = $("[data-pokechat='note'] [data-pc-note]");
+    var v = ta ? (ta.value || "") : (note || "");
+    if (!picked || !v.trim()) return;
+    queue.push({ path: location.pathname + location.search, selector: picked.selector, text: picked.text, note: v, name: picked.name, ts: Date.now() });
+    saveQueue(); renderFloating();
+    closeNoteDialog();
+    toast("已加入反馈队列（共 " + queue.length + " 条），Ctrl+F 可再次选择");
+  }
+  function sendDirectFromDialog() {
+    var ta = $("[data-pokechat='note'] [data-pc-note]");
+    var v = ta ? (ta.value || "") : (note || "");
+    if (!picked || !v.trim()) return;
+    sendFeedback([{ path: location.pathname + location.search, selector: picked.selector, text: picked.text, note: v, name: picked.name }]);
+    closeNoteDialog();
+  }
+  function sendFeedback(items) {
+    if (hasBackend()) {
+      post(api("/"), { items: items }, function () { refreshStatus(); toast("已发送给 AI，等待处理"); });
+    } else {
+      items.forEach(function (it) { queue.push({ path: it.path, selector: it.selector, text: it.text, note: it.note, name: it.name, ts: Date.now(), local: true }); });
+      saveQueue(); renderFloating(); toast("本地模式：已记录在 localStorage");
+    }
+  }
+
+  /* ================= 队列编辑 ================= */
+  function openEdit(it0, readonly) {
+    // 2026-08-25（182858「点击编辑后内容消失」）：闭包 it 可能因 10s 轮询陈旧/字段缺失——
+    // 从最新 status/queue 按 ts 重取一条
+    var it = it0;
+    if (it0 && it0.ts) {
+      var fromSt = (status.pending || []).concat(status.processing || [], status.done || [])
+        .find(function (x) { return x.ts === it0.ts; });
+      if (fromSt) it = fromSt;
+      var fromQ = queue.filter(function (q) { return q.ts === it0.ts; })[0];
+      if (fromQ) it = fromQ;
+    }
+    editing = it; note = it.note || "";  // 2026-08-22：无 note 字段时防空（note.trim 崩溃/保存空）
+    // 2026-08-22 修复：编辑弹窗要**叠加**在 IM 窗口之上（React 原版两层同显）。
+    // 只关备注弹窗，保留 IM 窗口；z-index 由 buildEditDialog 的 2147483001 保证在上层
+    var noteDlg = $("[data-pokechat='note']");
+    if (noteDlg) noteDlg.classList.add("hidden");
+    // 仅 pending 可编辑：打开编辑时标记 editing=true，AI 循环跳过（2026-08-22 用户要求）
+    if (!readonly && it.ts && !it.local) {
+      fetch(api("/") + "/" + it.ts, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ editing: true }) })
+        .catch(function () {});
+    }
+    var m = $("[data-pokechat='edit']");
+    $("[data-pc-path]", m).textContent = it.path;
+    $("[data-pc-sel]", m).textContent = it.selector;
+    // 2026-08-23（1105xx）：编辑/查看弹窗也显示组件名称
+    var nmEl = $("[data-pc-name]", m);
+    if (nmEl) { nmEl.textContent = it.name || ""; nmEl.closest("div").style.display = it.name ? "" : "none"; }
+    $("[data-pc-txt]", m).textContent = it.text || "（无文本）";
+    var ta = $("[data-pc-note]", m);
+    ta.value = it.note;
+    // 2026-08-22 用户要求：处理中/已完成点开=只读（能看不能发送）
+    ta.readOnly = !!readonly;
+    ta.style.background = readonly ? "rgba(255,255,255,.35)" : "rgba(255,255,255,.75)";
+    var save = $("[data-pc-save]", m);
+    var title = $("[data-pc-edit-title]", m);
+    if (title) title.textContent = readonly ? "查看反馈" : "编辑队列条目";
+    if (save) {
+      save.style.display = readonly ? "none" : "";
+      save.disabled = !it.note.trim(); save.style.opacity = it.note.trim() ? "1" : ".5";
+    }
+    m.classList.remove("hidden");
+  }
+  function closeEdit(skipPut) {
+    $("[data-pokechat='edit']").classList.add("hidden");
+    // 2026-08-22 修复（143013「保存后数据没了」）：saveEdit 已在一个 PUT 里
+    // 带 note + editing:false，这里再发一个**无 note** 的 PUT 会与其竞态；
+    // saveEdit 传 skipPut=true 跳过，避免覆盖/丢失备注
+    if (!skipPut && editing && editing.ts && !editing.local) {
+      fetch(api("/") + "/" + editing.ts, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ editing: false }) })
+        .catch(function () {});
+    }
+    editing = null;
+  }
+  function updateStatusItem(ts, newNote) {
+    // 2026-08-22（143013）：保存后本地立即更新列表，不等 PUT 响应/refreshStatus 竞态
+    status.pending = (status.pending || []).map(function (x) { return x.ts === ts ? Object.assign({}, x, { note: newNote }) : x; });
+    renderQueueDialog();
+  }
+  function saveEdit() {
+    if (!editing) return;
+    userScrolledAway = false;  // 2026-08-22：编辑保存后自动到底部
+    // ⚠️ 2026-08-22（143013「保存后数据没了」）：**从 textarea DOM 读值**做事实来源——
+    // 全局 note 变量可能因弹窗切换/重置与输入框不同步（保存空/旧值），DOM 永远是当前输入
+    // ⚠️ 2026-09-09（061558「输入内容会消失」）：DOM 里 note/edit 两个弹窗都有 [data-pc-note]，
+    // 裸 $("[data-pc-note]") 拿到的是**先创建的 note 弹窗**（被隐藏、输入框被清空）→ 编辑保存恒为空。
+    // 必须限定到 edit 弹窗作用域。
+    var ta = $("[data-pokechat='edit'] [data-pc-note]");
+    var newNote = ta ? (ta.value || "") : (note || "");
+    if (editing.ts && !editing.local) {
+      // 已提交反馈：一次 PUT 带 note + 清除 editing 标记（AI 恢复处理）
+      var ts = editing.ts;
+      fetch(api("/") + "/" + ts, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ note: newNote, editing: false }) })
+        .then(function () { updateStatusItem(ts, newNote); refreshStatus(); toast("已更新，AI 将按新备注处理"); })
+        .catch(function () { toast("更新失败，稍后重试"); });
+      closeEdit(true);
+    } else {
+      queue = queue.map(function (x) { return x.ts === editing.ts ? Object.assign({}, x, { note: newNote }) : x; });
+      saveQueue(); renderFloating(); renderQueueDialog(); closeEdit(true);  // 2026-08-22：本地队列保存后同步刷新 IM 列表
+    }
+  }
+  function removeQueueItem(ts) { queue = queue.filter(function (x) { return x.ts !== ts; }); saveQueue(); renderFloating(); }
+  function clearQueue() { queue = []; saveQueue(); renderFloating(); }
+  function sendQueue() {
+    if (!queue.length) return;
+    var items = queue.map(function (q) { return { path: q.path, selector: q.selector, text: q.text, note: q.note, name: q.name }; });
+    userScrolledAway = false;  // 2026-08-22：批量发送后自动到底部
+    if (hasBackend()) {
+      post(api("/"), { items: items }, function () { queue = []; saveQueue(); renderFloating(); refreshStatus(); toast("已发送 " + items.length + " 条反馈，等待 AI 处理"); });
+    } else {
+      toast("本地模式：未配置 endpoint，队列保留在 localStorage");
+      qOpen = false; renderQueueDialog();
+    }
+  }
+
+  /* ================= 状态轮询 ================= */
+  function refreshStatus() {
+    if (!hasBackend()) return;
+    fetch(api("/status")).then(function (r) { return r.json(); })
+      .then(function (d) {
+        status = d;
+        renderQueueDialog();
+        renderFloating();  // 2026-08-22 修复：状态变化同步悬浮按钮（数字 + 处理中 ping 点）
+      }).catch(function () {});
+  }
+
+  /* ================= UI：悬浮区（任务上 / 队列+🎯 下，对齐项目版） ================= */
+  function buildUI() {
+    var css = document.createElement("style");
+    css.textContent = GLASS_CSS;
+    document.head.appendChild(css);
+
+    var wrap = el("div", null);
+    wrap.setAttribute("data-pokechat", "");
+    // 2026-08-22：浮窗 z-index 降到 2000——之前 2147483000 会盖住任务队列悬浮窗
+    // （TaskFloating 面板 z-3000）；弹窗（modal）仍保持 2147483000+ 永远最上
+    // 2026-08-29：可拖动 + 角落吸附（铆钉角）。定位用 left/top，按角切换 right/bottom
+    var PC_CORNER_KEY = "pokechat-corner";
+    var PC_CORNERS = {
+      bl: { x: 16, y: 80, css: "left:${x}px;bottom:${y}px" },
+      br: { x: 16, y: 80, css: "right:${x}px;bottom:${y}px" },
+      tl: { x: 16, y: 80, css: "left:${x}px;top:${y}px" },
+      tr: { x: 16, y: 80, css: "right:${x}px;top:${y}px" },
+    };
+    var corner = (function () {
+      try { var c = localStorage.getItem(PC_CORNER_KEY); if (PC_CORNERS[c]) return c; } catch (e) {}
+      return "bl";
+    })();
+    function applyCorner(c) {
+      corner = c;
+      try { localStorage.setItem(PC_CORNER_KEY, c); } catch (e) {}
+      var cf = PC_CORNERS[c];
+      var x = cf.x, y = cf.y;
+      wrap.style.left = (c === "bl" || c === "tl") ? x + "px" : "auto";
+      wrap.style.right = (c === "br" || c === "tr") ? x + "px" : "auto";
+      wrap.style.top = (c === "tl" || c === "tr") ? y + "px" : "auto";
+      wrap.style.bottom = (c === "bl" || c === "br") ? y + "px" : "auto";
+    }
+    wrap.style.cssText = "position:fixed;z-index:2000;display:flex;flex-direction:column;align-items:flex-start;gap:8px;cursor:grab;user-select:none;";
+    applyCorner(corner);
+    // 铆钉角标记（拖动时显示）
+    var rivets = ["bl", "br", "tl", "tr"].map(function (c) {
+      var r = el("div", null);
+      var cf = PC_CORNERS[c];
+      r.style.cssText = "position:fixed;width:14px;height:14px;border:2px solid var(--pc-primary);border-radius:2px;display:none;z-index:2147483000;pointer-events:none;opacity:.7;";
+      if (c === "bl") r.style.cssText += "left:" + cf.x + "px;bottom:" + cf.y + "px;border-right:none;border-top:none;";
+      if (c === "br") r.style.cssText += "right:" + cf.x + "px;bottom:" + cf.y + "px;border-left:none;border-top:none;";
+      if (c === "tl") r.style.cssText += "left:" + cf.x + "px;top:" + cf.y + "px;border-right:none;border-bottom:none;";
+      if (c === "tr") r.style.cssText += "right:" + cf.x + "px;top:" + cf.y + "px;border-left:none;border-bottom:none;";
+      document.body.appendChild(r);
+      return r;
+    });
+    // 拖拽逻辑：mousedown → 移动超阈值进入拖动 → mouseup 吸附最近角
+    // 2026-08-30 修复（反馈 20260830-000012）：悬浮窗几乎全是按钮（反馈队列/🎯），
+    // 旧代码排除 button 导致无处可抓、拖不动 → 全区域可拖（含按钮），拖动后吞掉 click 不误触。
+    var drag = null;
+    var suppressClick = false;
+    wrap.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
+      suppressClick = false;
+      var rect = wrap.getBoundingClientRect();
+      drag = { sx: e.clientX, sy: e.clientY, ox: rect.left, oy: rect.top, moved: false };
+      if (!e.target.closest("button, a, input, textarea, select")) e.preventDefault();
+    });
+    document.addEventListener("mousemove", function (e) {
+      if (!drag) return;
+      var dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+      drag.moved = true;
+      suppressClick = true;
+      // 2026-08-30（反馈 001758）：5px 网格吸附（拖动时位置按 5px 步进）
+      wrap.style.left = Math.round((drag.ox + dx) / 5) * 5 + "px";
+      wrap.style.top = Math.round((drag.oy + dy) / 5) * 5 + "px";
+      wrap.style.right = "auto"; wrap.style.bottom = "auto";
+      wrap.style.cursor = "grabbing";
+      rivets.forEach(function (r) { r.style.display = "block"; });
+      // 高亮最近角
+      var best = nearestCorner(e.clientX, e.clientY);
+      rivets.forEach(function (r, i) { r.style.opacity = i === best ? "1" : ".35"; });
+    });
+    document.addEventListener("mouseup", function (e) {
+      if (!drag) return;
+      var moved = drag.moved;
+      drag = null;
+      wrap.style.cursor = "grab";
+      rivets.forEach(function (r) { r.style.display = "none"; });
+      // 2026-08-30（反馈 001758）：不再总是吸附角落——离角 <60px 才吸附，否则保留松手位置
+      if (moved) {
+        var nc = nearestCornerDist(e.clientX, e.clientY);
+        if (nc.dist < 60) { applyCorner(nc.c); }
+        else {
+          // 保留自由位置（left/top 已设好），清掉角落标记避免下次加载回弹
+          try { localStorage.removeItem(PC_CORNER_KEY); } catch (err) {}
+        }
+      }
+    });
+    // 拖动结束后吞掉本次 click，避免误触「反馈队列」/「🎯」按钮（2026-08-30）
+    document.addEventListener("click", function (e) {
+      if (suppressClick && e.target && e.target.closest && e.target.closest("[data-pokechat]")) {
+        e.preventDefault();
+        e.stopPropagation();
+        suppressClick = false;
+      }
+    }, true);
+    function nearestCorner(mx, my) {
+      return nearestCornerDist(mx, my).c;
+    }
+    function nearestCornerDist(mx, my) {
+      var vw = window.innerWidth, vh = window.innerHeight;
+      var pts = [
+        { c: "bl", x: PC_CORNERS.bl.x, y: vh - PC_CORNERS.bl.y },
+        { c: "br", x: vw - PC_CORNERS.br.x, y: vh - PC_CORNERS.br.y },
+        { c: "tl", x: PC_CORNERS.tl.x, y: PC_CORNERS.tl.y },
+        { c: "tr", x: vw - PC_CORNERS.tr.x, y: PC_CORNERS.tr.y },
+      ];
+      var best = pts[0];
+      for (var i = 1; i < pts.length; i++) {
+        if (Math.hypot(mx - pts[i].x, my - pts[i].y) < Math.hypot(mx - best.x, my - best.y)) best = pts[i];
+      }
+      return { c: best.c, dist: Math.hypot(mx - best.x, my - best.y) };
+    }
+
+    // 队列 + 🎯（下）—— 对齐项目版：队列按钮带处理中 ping 点；🎯 用 lucide MousePointerClick SVG 图标
+    var row = el("div", null);
+    row.style.cssText = "display:flex;align-items:center;gap:8px;";
+    var queueBtn = el("button", "pc-btn pc-btn-primary pc-glass", null);
+    queueBtn.innerHTML = "<span data-pc-flabel>反馈队列</span>";  // 2026-08-22：固定 label 节点，渲染只改文本不重建
+    queueBtn.style.cssText = "background:var(--pc-primary);color:#fff;border-radius:999px;padding:8px 14px;font-weight:700;font-size:12px;";
+    queueBtn.onclick = function () {
+      qOpen = !qOpen;
+      if (qOpen) closeAllDialogs("queue");  // 打开对话时关闭其他弹窗（2026-08-22 互斥）
+      renderQueueDialog();
+    };
+    var qDot = el("span", null);
+    qDot.style.cssText = "display:none;width:8px;height:8px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 0 rgba(251,191,36,.5);animation:pc-ping 1.5s cubic-bezier(0,0,.2,1) infinite;margin-left:4px;";
+    qDot.setAttribute("data-pc-qdot", "");
+    queueBtn.appendChild(qDot);
+    var pickBtn = el("button", "pc-glass", null);
+    pickBtn.setAttribute("data-pc-pickbtn", "");
+    pickBtn.style.cssText = "position:relative;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:12px;box-shadow:0 8px 20px rgba(0,0,0,.4);transition:transform .15s;";
+    // 2026-08-22 用户要求：100% 对齐 trade 项目代码
+    //   {picking ? <X className="h-5 w-5 text-primary" /> : <MousePointerClick className="h-5 w-5 text-primary" />}
+    // 选择模式激活时显示 X（20px），未激活显示 MousePointerClick（20px）
+    var MPC_PATHS = '<path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/>';
+    var X_PATHS = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>';
+    function renderPickIcon() {
+      pickBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (picking ? X_PATHS : MPC_PATHS) + '</svg>';
+      pickBtn.querySelector("svg").style.color = "var(--pc-primary)";
+    }
+    renderPickIcon();
+    window.__pcRenderPickIcon = renderPickIcon;  // startPicking/stopPicking 里同步图标
+    pickBtn.title = "选择组件（Ctrl+F）";
+    pickBtn.onclick = function () { picking ? stopPicking() : startPicking(); renderPickIcon(); };
+    pickBtn.onmouseenter = function () { pickBtn.style.transform = "scale(1.05)"; };
+    pickBtn.onmouseleave = function () { pickBtn.style.transform = ""; };
+    row.appendChild(queueBtn); row.appendChild(pickBtn);
+    wrap.appendChild(row);
+    document.body.appendChild(wrap);
+    if (!document.getElementById("pc-ping-kf")) {
+      var pk = document.createElement("style");
+      pk.id = "pc-ping-kf";
+      pk.textContent = "@keyframes pc-ping { 75%,100% { box-shadow:0 0 0 6px rgba(251,191,36,0); } }";
+      document.head.appendChild(pk);
+    }
+
+    // 2026-08-22 修复：任务提示条从右下角移到**左下角悬浮区、反馈队列上方**（对齐本地项目布局，
+    // 之前右下角显示被悬浮按钮挡住）
+    var taskBar = el("div", "pc-glass hidden");
+    taskBar.setAttribute("data-pokechat", "taskbar");
+    taskBar.style.cssText = "display:none;padding:6px 12px;font-size:11px;color:#fbbf24;align-items:center;gap:6px;";
+    taskBar.innerHTML = '<span class="pc-spin" style="display:inline-block;width:10px;height:10px;border:2px solid rgba(251,191,36,.3);border-top-color:#fbbf24;border-radius:50%;animation:pc-spin 1s linear infinite;"></span><span data-pc-task-text>任务处理中…</span>';
+    wrap.insertBefore(taskBar, wrap.firstChild);
+    if (!document.getElementById("pc-spin-kf")) {
+      var kf = document.createElement("style");
+      kf.id = "pc-spin-kf";
+      kf.textContent = "@keyframes pc-spin { to { transform: rotate(360deg); } }";
+      document.head.appendChild(kf);
+    }
+
+    // 备注弹窗
+    buildNoteDialog();
+    // 编辑弹窗
+    buildEditDialog();
+    // 队列对话大弹窗
+    buildQueueDialog();
+    // 滚动智能跟随：「回到底部」按钮（2026-08-22 用户要求）
+    setupScrollBtn(document.querySelector("[data-pokechat='queue']"));
+  }
+
+  function buildNoteDialog() {
+    var m = el("div", "pc-modal hidden");
+    m.setAttribute("data-pokechat", "note");
+    // z-index 3002：高于 edit(3001) 和 queue(3000)——IM 窗口开着时组件反馈弹窗叠加在其上（2026-08-22）
+    m.style.cssText = "position:fixed;inset:0;z-index:2147483002;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:24px;";
+    m.onclick = function (e) { if (e.target === m) closeNoteDialog(); };
+    // 组件反馈弹窗：白底深字（2026-08-22 用户反馈看不清；与编辑弹窗同款，保持玻璃圆角风格）
+    m.innerHTML =
+      '<div style="width:672px;max-width:94vw;padding:20px;border-radius:16px;' +
+      '  background:linear-gradient(162deg, rgba(255,255,255,.20), rgba(255,255,255,.10));' +
+      '  border:1px solid rgba(255,255,255,.25); box-shadow:0 12px 30px rgba(0,0,0,.35);' +
+      '  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); color:hsl(222 47% 8%);">' +
+      '  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+      '    <span style="font-weight:700;font-size:14px;color:hsl(222 47% 10%);">组件反馈</span>' +
+      '    <button data-pc-close style="background:none;border:none;color:hsl(222 20% 35%);cursor:pointer;padding:4px;display:flex;" title="取消">' +
+      '      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>' +
+      '    </button>' +
+      '  </div>' +
+      '  <div style="margin-bottom:8px;background:rgba(255,255,255,.55);border-radius:9px;padding:8px 10px;font-size:11px;color:hsl(222 25% 30%);line-height:1.6;">' +
+      '    <div>页面：<span style="font-family:monospace;color:hsl(222 45% 12%);font-weight:600;" data-pc-path></span></div>' +
+      '    <div>组件：<span style="font-family:monospace;color:hsl(222 45% 12%);font-weight:600;" data-pc-sel></span></div>' +
+      '    <div>名称：<span style="font-family:monospace;color:hsl(222 45% 12%);font-weight:600;" data-pc-name></span></div>' +
+      '    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title=""><span>内容：</span><span data-pc-txt></span></div>' +
+      '  </div>' +
+      '  <textarea data-pc-note rows="6" placeholder="备注：想怎么改？（如：把这里改成红色、加个筛选按钮…）Enter 提交，Shift+Enter 换行" style="margin-bottom:8px;resize:none;width:100%;box-sizing:border-box;' +
+      '    background:rgba(255,255,255,.75); color:hsl(222 45% 12%); border:1px solid rgba(0,0,0,.15); border-radius:9px; padding:8px 10px; font-size:13px; outline:none;"></textarea>' +
+      '  <div style="display:flex;justify-content:flex-end;gap:8px;">' +
+      '    <button data-pc-cancel style="background:none;border:none;color:hsl(222 20% 35%);cursor:pointer;padding:6px 12px;font-size:13px;">取消</button>' +
+      '    <button data-pc-sendd style="border:1px solid var(--pc-primary);color:var(--pc-primary);background:rgba(255,255,255,.5);border-radius:9px;padding:6px 12px;cursor:pointer;font-size:13px;" title="Enter">直接发送（Enter）</button>' +
+      '  </div>' +
+      '</div>';
+    $("[data-pc-cancel]", m).onclick = closeNoteDialog;
+    $("[data-pc-close]", m).onclick = closeNoteDialog;
+    $("[data-pc-sendd]", m).onclick = sendDirectFromDialog;
+    function syncBtns() {  // 对齐项目版 disabled 逻辑：备注为空时两个提交按钮禁用
+      var has = note.trim().length > 0;
+      $("[data-pc-sendd]", m).disabled = !has;
+      $("[data-pc-sendd]", m).style.opacity = has ? "1" : ".5";
+    }
+    var ta = $("[data-pc-note]", m);
+    ta.addEventListener("input", function () { note = ta.value; syncBtns(); });
+    ta.addEventListener("keydown", function (e) {
+      // ⚠️ 2026-08-22 修复：原生 JS 用 e.isComposing（e.nativeEvent 是 React 合成事件属性，
+      // 在原生事件里恒为 undefined，导致 IME 输入法按 Enter 确认候选词时误触发"加入队列"→弹窗消失）
+      if (e.isComposing || e.keyCode === 229) return;
+      var elNode = ta;
+      if (e.key === "Home") {
+        e.preventDefault();
+        if (e.ctrlKey || e.metaKey) elNode.selectionStart = elNode.selectionEnd = 0;
+        else { var ls = elNode.value.lastIndexOf("\n", elNode.selectionStart - 1) + 1; elNode.selectionStart = elNode.selectionEnd = ls; }
+      } else if (e.key === "End") {
+        e.preventDefault();
+        if (e.ctrlKey || e.metaKey) elNode.selectionStart = elNode.selectionEnd = elNode.value.length;
+        else { var nl = elNode.value.indexOf("\n", elNode.selectionStart); elNode.selectionStart = elNode.selectionEnd = nl === -1 ? elNode.value.length : nl; }
+      } else if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); if (note.trim()) sendDirectFromDialog(); }
+      // 2026-08-30（反馈 000229）：移除加入队列，Enter 直接发送
+      else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (note.trim()) sendDirectFromDialog(); }
+    });
+    document.body.appendChild(m);
+  }
+
+  function buildEditDialog() {
+    var m = el("div", "pc-modal hidden");
+    m.setAttribute("data-pokechat", "edit");
+    // z-index 比 IM 窗口高 1（2026-08-22）：编辑弹窗叠加在 IM 窗口之上
+    m.style.cssText = "position:fixed;inset:0;z-index:2147483001;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:24px;";
+    m.onclick = function (e) { if (e.target === m) closeEdit(); };
+    // 编辑弹窗卡片：稍白背景 + 深色字体（2026-08-22 用户反馈看不清；保持玻璃圆角风格不变）
+    m.innerHTML =
+      '<div style="width:672px;max-width:94vw;padding:20px;border-radius:16px;' +
+      '  background:linear-gradient(162deg, rgba(255,255,255,.20), rgba(255,255,255,.10));' +
+      '  border:1px solid rgba(255,255,255,.25); box-shadow:0 12px 30px rgba(0,0,0,.35);' +
+      '  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); color:hsl(222 47% 8%);">' +
+      '  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+      '    <span data-pc-edit-title style="font-weight:700;font-size:14px;color:hsl(222 47% 10%);">编辑队列条目</span>' +
+      '    <button data-pc-close style="background:none;border:none;color:hsl(222 20% 35%);cursor:pointer;padding:4px;display:flex;" title="取消">' +
+      '      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>' +
+      '    </button>' +
+      '  </div>' +
+      '  <div style="margin-bottom:8px;background:rgba(255,255,255,.55);border-radius:9px;padding:8px 10px;font-size:11px;color:hsl(222 25% 30%);line-height:1.6;">' +
+      '    <div>页面：<span style="font-family:monospace;color:hsl(222 45% 12%);font-weight:600;" data-pc-path></span></div>' +
+      '    <div>组件：<span style="font-family:monospace;color:hsl(222 45% 12%);font-weight:600;" data-pc-sel></span></div>' +
+      '    <div>名称：<span style="font-family:monospace;color:hsl(222 45% 12%);font-weight:600;" data-pc-name></span></div>' +
+      '    <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title=""><span>内容：</span><span data-pc-txt></span></div>' +
+      '  </div>' +
+      '  <textarea data-pc-note rows="6" placeholder="备注：想怎么改？Enter 保存 · Shift+Enter 换行" style="margin-bottom:8px;resize:none;width:100%;box-sizing:border-box;' +
+      '    background:rgba(255,255,255,.75); color:hsl(222 45% 12%); border:1px solid rgba(0,0,0,.15); border-radius:9px; padding:8px 10px; font-size:13px; outline:none;"></textarea>' +
+      '  <div style="display:flex;justify-content:flex-end;gap:8px;">' +
+      '    <button data-pc-cancel style="background:none;border:none;color:hsl(222 20% 35%);cursor:pointer;padding:6px 12px;font-size:13px;">取消</button>' +
+      '    <button data-pc-save style="background:var(--pc-primary);color:#fff;font-weight:600;border:none;border-radius:9px;padding:6px 14px;cursor:pointer;font-size:13px;" title="Enter">保存（Enter）</button>' +
+      '  </div>' +
+      '</div>';
+    $("[data-pc-cancel]", m).onclick = closeEdit;
+    $("[data-pc-close]", m).onclick = closeEdit;
+    $("[data-pc-save]", m).onclick = saveEdit;
+    var ta = $("[data-pc-note]", m);
+    function syncSave() {
+      var has = note.trim().length > 0;
+      var save = $("[data-pc-save]", m);
+      if (save) { save.disabled = !has; save.style.opacity = has ? "1" : ".5"; }
+    }
+    ta.addEventListener("input", function () { note = ta.value; syncSave(); });
+    ta.addEventListener("keydown", function (e) {
+      // 2026-08-22 修复：原生 JS 用 e.isComposing（同备注弹窗）
+      if (e.isComposing || e.keyCode === 229) return;
+      var elNode = ta;
+      if (e.key === "Home") {
+        e.preventDefault();
+        if (e.ctrlKey || e.metaKey) elNode.selectionStart = elNode.selectionEnd = 0;
+        else { var ls = elNode.value.lastIndexOf("\n", elNode.selectionStart - 1) + 1; elNode.selectionStart = elNode.selectionEnd = ls; }
+      } else if (e.key === "End") {
+        e.preventDefault();
+        if (e.ctrlKey || e.metaKey) elNode.selectionStart = elNode.selectionEnd = elNode.value.length;
+        else { var nl = elNode.value.indexOf("\n", elNode.selectionStart); elNode.selectionStart = elNode.selectionEnd = nl === -1 ? elNode.value.length : nl; }
+      } else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); note = ta.value; if (ta.value.trim()) saveEdit(); }
+    });
+    document.body.appendChild(m);
+  }
+
+  function buildQueueDialog() {
+    var d = el("div", "pc-modal hidden");
+    d.setAttribute("data-pokechat", "queue");
+    d.style.cssText = "position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:24px;";
+    d.onclick = function (e) { if (e.target === d) { qOpen = false; d.classList.add("hidden"); } };
+    // 100% 对齐项目版 IM 窗口：glass rounded-2xl h-[75vh] max-w-3xl +
+    // 顶部计数 + 左索引（直接/组件分组）+ 右对话（用户右/AI 左）+ 待发送区 + 直接发送
+    d.innerHTML =
+      '<div class="pc-glass" style="width:883px;max-width:96vw;height:75vh;display:flex;flex-direction:column;overflow:hidden;border-radius:16px;position:relative;">' +
+      '  <div style="padding:10px 16px;border-bottom:1px solid var(--pc-border);display:flex;justify-content:space-between;align-items:center;">' +
+      '    <b style="font-size:14px;">反馈对话</b>' +
+      '    <div style="font-size:12px;font-weight:600;color:var(--pc-text);display:flex;gap:14px;align-items:center;">' +
+      '      <span>等待 <b data-pc-n-pending style="color:#fcd34d">0</b></span>' +
+      '      <span>处理中 <b data-pc-n-processing style="color:#fcd34d">0</b></span>' +
+      '      <span>已完成 <b data-pc-n-done style="color:#6ee7b7">0</b></span>' +
+      '      <button data-pc-theme-btn style="background:none;border:none;color:var(--pc-muted);cursor:pointer;padding:2px 6px;font-size:14px;line-height:1;" title="主题设置（橙/蓝/紫 × 亮/暗）">🎨</button>' +
+      '      <button data-pc-dlg-close style="background:var(--pc-content);border:1px solid var(--pc-content-border);color:var(--pc-text);cursor:pointer;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;transition:background .15s;" title="关闭">✕</button>' +
+      '    </div>' +
+      '  </div>' +
+      '  <div style="display:flex;flex:1;min-height:0;">' +
+      // 2026-08-22 内容区方案：索引区 + 对话列表容器也套内容区背景（列表整体有底色，
+      // 逐条 wrap 再叠一层，层次清晰）——用户反馈「反馈列表没应用主项目内容区」
+      '    <div data-pc-index style="width:176px;border-right:1px solid var(--pc-content-border);overflow-y:auto;padding:8px;flex-shrink:0;background:rgba(255,255,255,.07);"></div>' +
+      '    <div style="flex:1;display:flex;flex-direction:column;min-width:0;">' +
+      '      <div data-pc-body style="flex:1;overflow-y:auto;padding:12px 16px;background:rgba(255,255,255,.05);"></div>' +
+      '      <div data-pc-pend style="border-top:1px solid var(--pc-border);padding:8px 12px 0;display:none;"></div>' +
+      '      <button data-pc-scrollbtn style="display:none;position:absolute;right:24px;bottom:120px;z-index:20;background:var(--pc-primary);color:#fff;border:none;border-radius:999px;padding:6px 14px;font-size:11px;font-weight:600;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.35);">回到底部</button>' +
+      '      <div style="padding:12px 16px;border-top:1px solid var(--pc-border);display:flex;gap:8px;">' +
+      '        <input class="pc-input" data-pc-dmsg placeholder="直接发消息给 AI（Enter 发送）" style="flex:1;min-width:0;">' +
+      '        <button class="pc-btn pc-btn-primary" data-pc-send style="padding:8px 14px;">发送</button>' +
+      '      </div>' +
+      '    </div>' +
+      '  </div>' +
+      '</div>';
+    $("[data-pc-dlg-close]", d).onclick = function () { qOpen = false; d.classList.add("hidden"); };
+    $("[data-pc-theme-btn]", d).onclick = function () { openThemeDialog(); };
+    $("[data-pc-send]", d).onclick = function () { sendDirectMsg(); };
+    $("[data-pc-dmsg]", d).addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendDirectMsg(); } });
+    $("[data-pc-dmsg]", d).addEventListener("input", function (e) { directMsg = e.target.value; });
+    document.body.appendChild(d);
+  }
+
+  function sendDirectMsg() {
+    var m = directMsg.trim();
+    if (!m) return;
+    userScrolledAway = false;  // 2026-08-22：发消息后自动到底部
+    sendFeedback([{ path: location.pathname + location.search, selector: "", text: "", note: m }]);
+    directMsg = "";
+    $("[data-pc-dmsg]").value = "";
+  }
+
+  /* ================= 主题设置（2026-08-22 用户纠正：**IM 自己的主题**） ================= */
+  // ⚠️ 只作用于 PokeChat 自己（[data-pokechat] 容器的 --pc-* 变量），
+  // **完全不碰主应用**（不改 html .light/.dark/data-color，不读写 vr-* 键）——
+  // 独立存储键 pc-theme。颜色主题控制主色/AI 气泡；明暗控制玻璃底与文字基色。
+  var THEMES = {
+    // 2026-08-22（评审优化）：每主题只存 primary，亮暗/透明度派生用 color-mix 生成——
+    // 加主题只需一行，不再手抄 10 个色值
+    orange: { label: "橙色", css: "#F35D2B", primary: "hsl(15 89% 56%)" },
+    blue: { label: "蓝色", css: "#3B82F6", primary: "hsl(217 91% 60%)" },
+    purple: { label: "紫色", css: "#8B5CF6", primary: "hsl(258 90% 66%)" },
+  };
+  function pcMix(pct, toward) { return "color-mix(in srgb, var(--pc-primary) " + pct + "%, " + toward + ")"; }
+
+  function getTheme() {
+    var dark = localStorage.getItem("pc-theme-dark") !== "0";
+    var color = localStorage.getItem("pc-theme-color");
+    if (color !== "blue" && color !== "purple") color = "orange";
+    return { dark: dark, color: color };
+  }
+  function applyTheme(t) {
+    localStorage.setItem("pc-theme-dark", t.dark ? "1" : "0");
+    localStorage.setItem("pc-theme-color", t.color);
+    var th = THEMES[t.color];
+    // 2026-08-22（用户反馈「只影响浮窗」）：变量必须设在 documentElement（:root）——
+    // IM 弹窗/备注弹窗是 body 直接子级，不继承浮窗容器上的变量；--pc-* 是 PokeChat
+    // 专用命名空间，主应用（--primary 等）完全不受影响
+    var root = document.documentElement;
+    // 颜色主题：主色 + 用户/AI 气泡（亮/暗各一套，color-mix 从 primary 派生）
+    root.style.setProperty("--pc-primary", th.primary);
+    root.style.setProperty("--pc-ai-bg", t.dark ? pcMix(20, "transparent") : pcMix(14, "transparent"));
+    root.style.setProperty("--pc-ai-border", t.dark ? pcMix(35, "transparent") : pcMix(28, "transparent"));
+    root.style.setProperty("--pc-ai-text", t.dark ? pcMix(65, "white") : pcMix(60, "black"));
+    root.style.setProperty("--pc-ub-bg", t.dark ? pcMix(22, "transparent") : pcMix(16, "transparent"));
+    root.style.setProperty("--pc-ub-border", t.dark ? pcMix(38, "transparent") : pcMix(30, "transparent"));
+    // 明暗：玻璃底色 + 文字基色（亮色 = 更实白底 + 深色文字）
+    if (t.dark) {
+      root.style.setProperty("--pc-content", "rgba(255,255,255,.13)");
+      root.style.setProperty("--pc-content-strong", "rgba(255,255,255,.18)");
+      root.style.setProperty("--pc-content-border", "rgba(255,255,255,.24)");
+      root.style.setProperty("--pc-text", "hsl(210 30% 94%)");
+      root.style.setProperty("--pc-muted", "hsl(215 20% 76%)");
+      root.style.setProperty("--pc-border", "rgba(255,232,214,.16)");
+      root.style.setProperty("--pc-card-2", "rgba(255,255,255,.09)");
+    } else {
+      root.style.setProperty("--pc-content", "rgba(255,255,255,.55)");
+      root.style.setProperty("--pc-content-strong", "rgba(255,255,255,.62)");
+      root.style.setProperty("--pc-content-border", "rgba(15,40,70,.20)");
+      root.style.setProperty("--pc-text", "hsl(222 40% 14%)");
+      root.style.setProperty("--pc-muted", "hsl(215 18% 42%)");
+      root.style.setProperty("--pc-border", "rgba(15,40,70,.16)");
+      root.style.setProperty("--pc-card-2", "rgba(255,255,255,.6)");
+    }
+  }
+  function buildThemeDialog() {
+    var d = el("div", "pc-modal hidden");
+    d.setAttribute("data-pokechat", "theme");
+    d.style.cssText = "position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;";
+    d.onclick = function (e) { if (e.target === d) d.classList.add("hidden"); };
+    d.innerHTML =
+      '<div class="pc-glass" style="width:320px;padding:20px;border-radius:16px;">' +
+      '  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+      '    <b style="font-size:14px;">主题设置</b>' +
+      '    <button data-pc-theme-close style="background:none;border:none;color:var(--pc-text);cursor:pointer;padding:2px 6px;font-size:15px;" title="关闭">✕</button>' +
+      '  </div>' +
+      '  <div style="font-size:11px;font-weight:600;color:var(--pc-muted);margin-bottom:8px;">颜色主题</div>' +
+      '  <div data-pc-theme-colors style="display:flex;gap:8px;margin-bottom:16px;"></div>' +
+      '  <div style="font-size:11px;font-weight:600;color:var(--pc-muted);margin-bottom:8px;">明暗</div>' +
+      '  <div data-pc-theme-modes style="display:flex;gap:8px;"></div>' +
+      '  <div data-pc-theme-hint style="margin-top:12px;font-size:10px;color:var(--pc-muted-2);"></div>' +
+      '</div>';
+    $("[data-pc-theme-close]", d).onclick = function () { d.classList.add("hidden"); };
+    document.body.appendChild(d);
+  }
+  function renderThemeDialog() {
+    var d = document.querySelector("[data-pokechat='theme']");
+    if (!d) return;
+    var t = getTheme();
+    var box = $("[data-pc-theme-colors]", d);
+    box.innerHTML = Object.keys(THEMES).map(function (k) {
+      var th = THEMES[k];
+      return "<button data-pc-tc='" + k + "' style='flex:1;border-radius:10px;padding:8px 0;font-size:12px;font-weight:500;cursor:pointer;text-align:center;border:1px solid " +
+        (t.color === k ? "var(--pc-primary);box-shadow:0 0 0 2px var(--pc-primary);" : "var(--pc-border);") + "background:rgba(255,255,255,.04);color:var(--pc-text);'>" +
+        "<span style='display:block;width:20px;height:20px;border-radius:50%;background:" + th.css + ";margin:0 auto 4px;'></span>" + th.label + "</button>";
+    }).join("");
+    Object.keys(THEMES).forEach(function (k) {
+      var b = box.querySelector("[data-pc-tc='" + k + "']");
+      if (b) b.onclick = function () { applyTheme({ dark: getTheme().dark, color: k }); renderThemeDialog(); };
+    });
+    var mb = $("[data-pc-theme-modes]", d);
+    mb.innerHTML = ["light", "dark"].map(function (m) {
+      var on = t.dark === (m === "dark");
+      return "<button data-pc-tm='" + m + "' style='flex:1;border-radius:10px;padding:8px 0;font-size:12px;font-weight:500;cursor:pointer;border:1px solid " +
+        (on ? "var(--pc-primary);box-shadow:0 0 0 2px var(--pc-primary);" : "var(--pc-border);") + "background:rgba(255,255,255,.04);color:var(--pc-text);'>" +
+        (m === "light" ? "☀️ 亮色" : "🌙 暗色") + "</button>";
+    }).join("");
+    mb.querySelector("[data-pc-tm='light']").onclick = function () { applyTheme({ dark: false, color: getTheme().color }); renderThemeDialog(); };
+    mb.querySelector("[data-pc-tm='dark']").onclick = function () { applyTheme({ dark: true, color: getTheme().color }); renderThemeDialog(); };
+    $("[data-pc-theme-hint]", d).textContent = "当前：" + THEMES[t.color].label + " · " + (t.dark ? "暗色" : "亮色") + "（选择即时生效并保存）";
+  }
+  function openThemeDialog() {
+    renderThemeDialog();
+    var d = document.querySelector("[data-pokechat='theme']");
+    if (d) d.classList.remove("hidden");
+  }
+
+  function renderFloating() {
+    var qb = document.querySelector("[data-pokechat] .pc-btn-primary");
+    if (!qb) return;
+    // 2026-08-22（评审优化）：固定 label 节点只改文本，不再摘/放 ping 点
+    var label = qb.querySelector("[data-pc-flabel]");
+    if (label) label.textContent = queue.length ? "反馈队列（" + queue.length + "）" : "反馈队列";
+    var dot = qb.querySelector("[data-pc-qdot]");
+    var running = (status.pending ? status.pending.length : 0) + (status.processing ? status.processing.length : 0);
+    if (dot) dot.style.display = running > 0 ? "inline-block" : "none";
+  }
+
+  function renderQueueDialog() {
+    var d = document.querySelector("[data-pokechat='queue']");
+    if (!d) return;
+    if (!qOpen) { d.classList.add("hidden"); return; }
+    d.classList.remove("hidden");
+    var p = status.pending.length, pr = status.processing.length, dn = status.done.length;
+    $("[data-pc-n-pending]", d).textContent = p;
+    $("[data-pc-n-processing]", d).textContent = pr;
+    $("[data-pc-n-done]", d).textContent = dn;
+
+    // 索引（直接对话 / 组件对话，新在上）
+    var idx = $("[data-pc-index]", d);
+    idx.innerHTML = "";
+    var convo = status.done.concat(status.processing, status.pending).sort(function (a, b) { return String(b.ts).localeCompare(String(a.ts)); });
+    var direct = convo.filter(function (x) { return !x.selector; });
+    var comp = convo.filter(function (x) { return !!x.selector; });
+    function renderIdx(title, list) {
+      // 2026-08-22 用户要求：分组标题显示实时数量（直接对话 N / 组件对话 N）
+      idx.appendChild(el("div", null, "<div style='font-size:10px;font-weight:700;color:var(--pc-text);margin:8px 0 4px;text-transform:uppercase;'>" + title + " <span style='color:#fcd34d;font-size:10px;'>(" + list.length + ")</span></div>"));
+      if (!list.length) idx.appendChild(el("p", null, "<span style='font-size:11px;color:rgba(148,163,184,.4)'>无</span>"));
+      list.forEach(function (it) {
+        var b = el("button", "pc-btn", null);
+        // 2026-08-22 主题内容区方案：索引条目用内容区不透明背景 + 圆角
+        b.style.cssText = "display:block;width:100%;text-align:left;font-size:11px;padding:5px 8px;margin-bottom:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--pc-content);border:1px solid var(--pc-content-border);border-radius:8px;";
+        var st = it.conclusion ? "done" : (status.processing.indexOf(it) >= 0 ? "processing" : "pending");
+        // 2026-08-22 修复：组件反馈条目索引始终显示组件信息（selector），note 作为次要附注——
+        // 之前 note 优先导致有 note 时组件选择器信息被吞
+        // 2026-08-23（1105xx）：有 data-name 时优先显示名称
+        var idxLabel = it.selector ? ((it.name || it.selector) + (it.note ? "：" + it.note : ""))
+          : (it.note || it.text || it.path);
+        b.innerHTML = "<span style='display:inline-block;width:6px;height:6px;border-radius:50%;background:" +
+          (st === "done" ? "var(--pc-green)" : st === "processing" ? "var(--pc-amber)" : "var(--pc-muted)") + ";margin-right:5px;'></span>" + esc(idxLabel);
+        b.onclick = function () { var bd = $("[data-pc-body]", d); var t = bd.querySelector('[data-msg="' + it.ts + '"]'); if (t) t.scrollIntoView({ behavior: "smooth", block: "center" }); };
+        idx.appendChild(b);
+      });
+    }
+    renderIdx("直接对话", direct);
+    renderIdx("组件对话", comp);
+
+    // 对话体（用户右 / AI 左，自动滚底）——100% 对齐项目版：
+    // 用户消息右侧带状态徽标；AI 回复左侧带 AI 徽标 + 时间戳；待发送区独立在输入框上方
+    var body = $("[data-pc-body]", d);
+    body.innerHTML = "";
+    var convo2 = status.done.concat(status.processing, status.pending).sort(function (a, b) { return String(a.ts).localeCompare(String(b.ts)); });
+    if (!convo2.length && !queue.length) {
+      body.innerHTML = "<p style='text-align:center;color:var(--pc-muted);padding:50px 0;font-size:13px'>暂无记录，点 🎯 选个组件试试</p>";
+    }
+    // 待发送区（独立条，在发送框上方）
+    var pend = $("[data-pc-pend]", d);
+    if (queue.length) {
+      pend.style.display = "block";
+      pend.innerHTML =
+        "<div style='font-size:11px;font-weight:700;color:var(--pc-muted);margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;'>" +
+        "  <span>待发送（" + queue.length + "）</span>" +
+        "  <span><button class='pc-btn' data-pc-clear style='font-size:10px;padding:2px 10px;background:none;color:var(--pc-muted);'>清空</button>" +
+        "  <button class='pc-btn pc-btn-primary' data-pc-sendq style='font-size:10px;padding:2px 10px;'>发送给 AI（" + queue.length + "）</button></span>" +
+        "</div>" +
+        "<div style='display:flex;flex-wrap:wrap;gap:6px;padding-bottom:8px;'>" +
+        queue.map(function (q) {
+          return "<button data-pc-qchip='" + q.ts + "' style='max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:var(--pc-content);border:1px solid var(--pc-content-border);border-radius:999px;padding:3px 10px;font-size:11px;cursor:pointer;color:var(--pc-text);'>" + esc(q.note || q.selector || q.path) + "</button>";
+        }).join("") +
+        "</div>";
+      $("[data-pc-clear]", pend).onclick = clearQueue;
+      $("[data-pc-sendq]", pend).onclick = sendQueue;
+      queue.forEach(function (q) {
+        var chip = $("[data-pc-qchip='" + q.ts + "']", pend);
+        if (chip) chip.onclick = function () { openEdit(q); };
+      });
+    } else {
+      pend.style.display = "none";
+      pend.innerHTML = "";
+    }
+    convo2.forEach(function (it) {
+      var st = it.conclusion ? "done" : (status.processing.indexOf(it) >= 0 ? "processing" : "pending");
+      var wrap = el("div", null);
+      wrap.setAttribute("data-msg", it.ts);
+      // 2026-08-22 主题内容区方案：对话逐条 = 内容区背景卡片（气泡在其内，层次更清晰）
+      wrap.style.cssText = "margin-bottom:10px;background:var(--pc-content);border:1px solid var(--pc-content-border);border-radius:12px;padding:8px 10px;";
+      var stLabel = st === "done" ? "已完成" : st === "processing" ? "处理中" : "等待";
+      var stCls = st === "done" ? "pc-badge-done" : st === "processing" ? "pc-badge-proc" : "pc-badge-wait";
+      var tsStr = String(it.ts || "");
+      var time = tsStr.length >= 12 ? tsStr.slice(8, 10) + ":" + tsStr.slice(10, 12) : "";
+      // 用户（右，圆角右上小）——对齐项目版 bg-secondary/25 + 状态徽标
+      // 2026-08-22 用户要求：等待/处理中的消息可点击再编辑（pending/processing 可编辑，done 不可）
+      // 2026-08-22 用户要求：只有「等待」（pending）可编辑；处理中/已完成不可编辑（AI 正在处理）
+      var editable = st === "pending";
+      // 2026-08-22 整套信息层级方案（不再逐个改）：
+      // 组件选择器=橙红等宽 chip · 组件文本=橙红粗体 · 备注=亮白正文 · 页面路径=深底 chip
+      // 气泡背景提实（.10 + 边框），保证所有文字有底可读
+      // 2026-08-22（152028）：气泡配色对齐 IM 惯例——**我方=主色系底色**，
+      // AI 回复=带点透明度的白（组件反馈页风格）。原来正好反了，已交换。
+      wrap.innerHTML =
+        "<div style='display:flex;justify-content:flex-end;'>" +
+        "  <div data-pc-ub='" + esc(it.ts) + "' style='max-width:78%;background:var(--pc-ub-bg);border:1px solid var(--pc-ub-border);border-radius:16px 16px 2px 16px;padding:8px 12px;font-size:12px;" + (editable ? "cursor:pointer;border:1px dashed var(--pc-ub-border);" : "") + "'>" +
+        (it.selector ? "    <div style='display:inline-block;font-family:monospace;font-size:10px;color:#fcd34d;background:rgba(252,211,77,.12);border:1px solid rgba(252,211,77,.3);border-radius:4px;padding:0 5px;margin-bottom:3px;'>" + esc(it.selector) + "</div>" : "") +
+        (it.text ? "    <div style='font-weight:700;font-size:12px;color:#fff;'>" + esc(it.text) + "</div>" : "") +
+        "    <div style='margin-top:2px;color:var(--pc-text);'>" + esc(it.note) + "</div>" +
+        (it.path ? "    <div style='margin-top:3px;font-size:9px;color:#cbd5e1;background:rgba(15,23,42,.6);border-radius:4px;padding:1px 5px;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>" + esc(it.path) + "</div>" : "") +
+        "    <div style='margin-top:5px;'><span class='pc-badge " + stCls + "' style='display:inline-block;'>" + stLabel + "</span>" +
+        (st !== "done" ? " <span style='font-size:9px;color:var(--pc-muted);margin-left:4px;'>" + (editable ? "点击编辑" : "点击查看") + "</span>" : "") + "</div>" +
+        "  </div>" +
+        "</div>" +
+        // AI（左，主色淡橙 + AI 徽标 + 时间戳）——整体方案：背景提实 + 边框（2026-08-22）
+        "<div style='display:flex;justify-content:flex-start;margin-top:5px;'>" +
+        "  <div style='max-width:78%;background:rgba(255,255,255,.10);border:1px solid var(--pc-content-border);border-radius:16px 16px 16px 2px;padding:8px 12px;font-size:12px;color:var(--pc-text);white-space:pre-wrap;word-break:break-word;'>" +
+        "    <div style='margin-bottom:3px;display:flex;align-items:center;gap:6px;'>" +
+        "      <span style='background:var(--pc-ai-bg);border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;color:var(--pc-ai-text);'>AI</span>" +
+        "      <span style='font-family:monospace;font-size:10px;color:var(--pc-muted-2);'>" + time + "</span>" +
+        "    </div>" +
+        (st === "done" ? esc(it.conclusion || "已处理完成") : st === "processing" ? "处理中…" : "等待调度，AI 收到后立即处理") +
+        "  </div>" +
+        "</div>";
+      body.appendChild(wrap);
+      // 2026-08-22 用户要求：等待=可编辑；处理中/已完成=可点开但**只读**（能看不能发送）
+      var ub = wrap.querySelector("[data-pc-ub='" + String(it.ts) + "']");
+      if (ub) ub.onclick = function () { openEdit(it, st !== "pending"); };
+    });
+    // 2026-08-22 用户要求：只有**主动滚动离开底部**（userScrolledAway）才不自动跳底；
+    // 发消息/编辑历史等主动操作会重置标志 → 自动到底部
+    if (!userScrolledAway || nearBottom(body)) {
+      body.scrollTop = body.scrollHeight;
+      var sb = $("[data-pc-scrollbtn]", d);
+      if (sb) sb.style.display = "none";
+      userScrolledAway = false;
+    } else {
+      var sb2 = $("[data-pc-scrollbtn]", d);
+      if (sb2) sb2.style.display = "block";
+    }
+  }
+
+  var userScrolledAway = false;  // 2026-08-22：用户主动滚动离开底部时才不自动跳底
+  function nearBottom(body) {
+    return body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+  }
+  function setupScrollBtn(d) {
+    var body = $("[data-pc-body]", d);
+    var btn = $("[data-pc-scrollbtn]", d);
+    if (!body || !btn) return;
+    body.addEventListener("scroll", function () {
+      var nb = nearBottom(body);
+      // 只有用户**手动**滚动且离开底部 → 标记；回到底部自动清除
+      userScrolledAway = !nb;
+      btn.style.display = nb ? "none" : "block";
+    });
+    btn.onclick = function () {
+      body.scrollTo({ top: body.scrollHeight, behavior: "smooth" });
+      btn.style.display = "none";
+      userScrolledAway = false;
+    };
+  }
+
+  function toast(msg) {
+    var t = el("div", "pc-glass", null);
+    t.setAttribute("data-pokechat", "");
+    t.style.cssText = "position:fixed;bottom:140px;left:50%;transform:translateX(-50%);z-index:2000;padding:8px 16px;font-size:13px;background:rgba(17,28,46,.92);";
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 2500);
+  }
+
+  /* ================= 任务提示（轮询后端时显示） ================= */
+  var taskTimer = null;
+  function startTaskPolling() {
+    if (!hasBackend() || taskTimer) return;
+    taskTimer = setInterval(function () {
+      fetch(api("/status")).then(function (r) { return r.json(); })
+        .then(function (d) {
+          var running = d.pending.length + d.processing.length;
+          var bar = document.querySelector("[data-pokechat='taskbar']");
+          if (bar) {
+            if (running > 0) { bar.style.display = "flex"; $("[data-pc-task-text]", bar).textContent = "任务处理中（等待 " + d.pending.length + " · 处理中 " + d.processing.length + "）"; }
+            else bar.style.display = "none";
+          }
+          if (JSON.stringify(d) !== JSON.stringify(status)) { status = d; renderQueueDialog(); }
+        }).catch(function () {});
+    }, 5000);
+  }
+
+  /* ================= 初始化（兼容第三方项目：DOM 未就绪时等待，2026-08-22） ================= */
+  var inited = false;  // 2026-08-22（评审优化）：幂等 guard，重复 init 不重复建 UI
+  function doInit(config) {
+    if (inited) return;
+    inited = true;
+    cfg = Object.assign({ endpoint: DEFAULT_ENDPOINT, apiPrefix: "/api/feedback" }, config || {});
+    loadQueue();
+    buildUI();
+    buildThemeDialog();
+    applyTheme(getTheme());  // 2026-08-22：初始化应用 IM 自己的主题（不碰主应用）
+    renderFloating();
+    refreshStatus();
+    startTaskPolling();
+    setInterval(function () { refreshStatus(); }, 10000);
+  }
+  global.PokeChat = {
+    init: function (config) {
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function () { doInit(config); });
+      } else {
+        doInit(config);
+      }
+    },
+    open: function () { qOpen = true; renderQueueDialog(); },
+  };
+})(window);

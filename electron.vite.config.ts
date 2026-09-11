@@ -86,6 +86,13 @@ export default defineConfig({
       port: 9015,
       strictPort: true,
     },
+    // The vendored PokeChat client lives at <repo>/pokechat and is the only
+    // static asset the renderer serves, so that directory doubles as the
+    // public dir. Contents map to the URL root, which keeps index.html's
+    // /pokechat.js reference valid in dev and (rewritten to ./pokechat.js)
+    // in the packaged build. If other static assets appear later, give
+    // PokeChat its own folder and point this back at src/renderer/public.
+    publicDir: resolve(__dirname, 'pokechat'),
     resolve: {
       alias: {
         '@renderer': resolve(__dirname, 'src/renderer'),
