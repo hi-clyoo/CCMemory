@@ -6,11 +6,33 @@ import { EditorState, StateEffect, StateField } from '@codemirror/state'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { Decoration, EditorView, lineNumbers } from '@codemirror/view'
 import { getTrafficLightPaddingForZoom } from '@shared/constants'
-import { Moon,RefreshCw,Sun } from 'lucide-react'
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  Eye,
+  EyeOff,
+  FileJson,
+  FileText,
+  Folder,
+  Globe,
+  Info,
+  Languages,
+  Link2,
+  Moon,
+  Palette,
+  RefreshCw,
+  Search,
+  Settings,
+  Sun,
+  X,
+} from 'lucide-react'
 
 import { GitStatusIcon } from './components/GitStatusIcon'
+import { GroupIcon } from './components/GroupIcon'
 import { CustomTitleBar } from './components/layout/CustomTitleBar'
-import { useTheme } from './hooks/useTheme'
+import { COLORWAY_LABELS, COLORWAY_SWATCHES, COLORWAYS, useTheme } from './hooks/useTheme'
 import { useZoomFactor } from './hooks/useZoomFactor'
 import { isElectronMode } from './api'
 
@@ -24,7 +46,6 @@ interface MemFile { path: string; type: string; tokens: number; content?: string
 interface FileGroup {
   type: string
   label: string
-  icon: string
   color: string
   desc: string
   path: string
@@ -39,7 +60,7 @@ interface FileGroup {
 
 const GLOBAL_GROUP_DEFS = [
   {
-    type: 'Managed', label: 'Managed', icon: '🛡️', color: '#A855F7',
+    type: 'Managed', label: 'Managed', color: '#A855F7',
     desc: 'System-level mandatory rules from Claude Code installation. Automatically loaded for every session — always in effect.',
     path: '<install>/CLAUDE.md  (e.g., C:\\Program Files\\ClaudeCode\\CLAUDE.md)',
     priority: 'Always loaded — applies to all projects',
@@ -49,7 +70,7 @@ const GLOBAL_GROUP_DEFS = [
     priorityZh: '始终加载——适用于所有项目',
   },
   {
-    type: 'User', label: 'User', icon: '👤', color: '#3B82F6',
+    type: 'User', label: 'User', color: '#3B82F6',
     desc: 'Your personal global instructions (via /config). Loaded for ALL projects. Merged with project-specific rules below.',
     path: '~/.claude/CLAUDE.md',
     priority: 'Always loaded — applies globally',
@@ -62,7 +83,7 @@ const GLOBAL_GROUP_DEFS = [
 
 const PROJECT_GROUP_DEFS = [
   {
-    type: 'Project', label: 'Project', icon: '📄', color: '#F97316',
+    type: 'Project', label: 'Project', color: '#F97316',
     desc: 'Project-level instructions, checked into git — shared with your team. Also loaded from .claude/ subdirectories.',
     path: './CLAUDE.md  /  .claude/CLAUDE.md',
     priority: 'Loaded per-project — adds to User rules',
@@ -72,7 +93,7 @@ const PROJECT_GROUP_DEFS = [
     priorityZh: '按项目加载——叠加在用户规则之上',
   },
   {
-    type: 'Local', label: 'Local', icon: '🔒', color: '#22C55E',
+    type: 'Local', label: 'Local', color: '#22C55E',
     desc: 'Local-only additions, NEVER checked into git. Use for personal project tweaks. Takes precedence on conflicts.',
     path: './CLAUDE.local.md',
     priority: 'Loaded per-project — takes precedence on conflicts',
@@ -82,7 +103,7 @@ const PROJECT_GROUP_DEFS = [
     priorityZh: '按项目加载——冲突时优先',
   },
   {
-    type: 'AutoMem', label: 'Memory', icon: '🧠', color: '#EC4899',
+    type: 'AutoMem', label: 'Memory', color: '#EC4899',
     desc: 'Auto-generated memory from conversations. Managed by Claude via MEMORY.md index. Project-scoped.',
     path: '~/.claude/projects/<proj>/memory/',
     priority: 'Loaded alongside rules (separate channel)',
@@ -92,7 +113,7 @@ const PROJECT_GROUP_DEFS = [
     priorityZh: '与规则同时加载（独立通道）',
   },
   {
-    type: 'Index', label: 'Index', icon: '🔗', color: '#06B6D4',
+    type: 'Index', label: 'Index', color: '#06B6D4',
     desc: 'Markdown files linked from CLAUDE.md files, grouped by directory. The backlink ("indexed by") is shown at the top of each file.',
     path: 'files linked from CLAUDE.md',
     priority: 'Reverse index — grouped by directory',
@@ -104,6 +125,10 @@ const PROJECT_GROUP_DEFS = [
 ]
 
 const GROUP_DEFS = [...GLOBAL_GROUP_DEFS, ...PROJECT_GROUP_DEFS]
+
+/** Shared row states — every selectable row in the tree uses these. */
+const ROW_SELECTED = 'text-text bg-accent-subtle shadow-[inset_2px_0_0_var(--color-accent)]'
+const ROW_IDLE = 'text-text-secondary hover:bg-surface-raised/60 hover:text-text'
 
 // ------------------------------------------------------------
 // Lightweight i18n (en / zh)
@@ -275,7 +300,7 @@ const App: React.FC = () => {
   const zoomFactor = useZoomFactor()
   const isMac = /Mac/i.test(navigator.userAgent)
   const trafficLightPadding = isElectronMode() && isMac ? getTrafficLightPaddingForZoom(zoomFactor) : 0
-  const { isLight, toggleTheme } = useTheme()
+  const { isLight, colorway, setTheme, toggleTheme, setColorway } = useTheme()
 
   // Reload global CLAUDE.md files (Managed + User). Used on mount and by the refresh button.
   const loadGlobalGroups = useCallback(async () => {
@@ -601,20 +626,18 @@ const App: React.FC = () => {
       <div
         key={rowKey ?? f.path}
         onClick={() => void handleSelectFile(f)}
-        className={`pl-10 pr-3 py-1.5 cursor-pointer text-xs transition-colors flex items-center gap-2 ${
-          selectedFile?.path === f.path
-            ? 'text-blue-400 bg-blue-600/10 border-r-2 border-blue-500'
-            : 'text-text-secondary hover:bg-surface-raised/70 hover:text-text'
+        className={`pl-9 pr-3 py-2 cursor-pointer text-xs transition-colors flex items-center gap-2 ${
+          selectedFile?.path === f.path ? ROW_SELECTED : ROW_IDLE
         }`}
       >
-        <span className="text-text-muted shrink-0">📄</span>
+        <FileText className="size-3.5 shrink-0 text-text-muted" />
         <GitStatusIcon status={gitStatus[f.path]} lang={lang} />
         <span className="font-mono truncate">
           {dirLabel ? `${dirLabel}/` : ''}
           {f.path.split(/[\\/]/).pop()}
         </span>
         {f.tokens > 0 && (
-          <span className="text-text-muted shrink-0 ml-auto">{formatTokens(f.tokens)}</span>
+          <span className="text-text-muted shrink-0 ml-auto text-2xs">{formatTokens(f.tokens)}</span>
         )}
       </div>
     )
@@ -639,7 +662,7 @@ const App: React.FC = () => {
       const { sourceName, files } = entry
       return (
         <div key={sourcePath}>
-          <div className="pl-8 pr-3 py-1 text-[10px] text-text-muted font-mono truncate" title={sourcePath || undefined}>
+          <div className="pl-9 pr-3 py-1 text-2xs text-text-muted font-mono truncate" title={sourcePath || undefined}>
             {sourceName}
           </div>
           {files.map(f => {
@@ -688,31 +711,36 @@ const App: React.FC = () => {
   const renderProjectItem = (proj: Project, hidden = false): React.JSX.Element => (
     <div key={proj.id}>
       <div
-        className={`px-3 py-2 text-sm flex items-center gap-2 transition-colors hover:bg-surface-raised group ${
-          selectedProjectId === proj.id ? 'bg-blue-600/10' : ''}`}>
+        className={`px-3 py-2 text-xs flex items-center gap-2 transition-colors group ${
+          selectedProjectId === proj.id ? ROW_SELECTED : ROW_IDLE}`}>
         <span
           onClick={(e) => handleArrowClick(e, proj.id)}
-          className="text-xs text-text-muted cursor-pointer hover:text-text-secondary px-0.5"
-        >{expandedProject === proj.id ? '▼' : '▶'}</span>
-        <span className="text-xs">📁</span>
+          className="text-text-muted cursor-pointer hover:text-text shrink-0 flex items-center"
+        >
+          {expandedProject === proj.id
+            ? <ChevronDown className="size-3" />
+            : <ChevronRight className="size-3" />}
+        </span>
+        <Folder className="size-3.5 shrink-0 text-text-muted" />
         <span
           onClick={() => handleProjectClick(proj)}
-          className={`font-medium truncate cursor-pointer flex-1 ${hidden ? 'text-text-muted' : 'text-text-secondary'}`} title={proj.path || proj.name}>{projectTitle(proj)}</span>
-        <span className="text-xs text-text-muted">{proj.sessions.length}</span>
+          className={`font-medium truncate cursor-pointer flex-1 ${hidden ? 'text-text-muted' : ''}`} title={proj.path || proj.name}>{projectTitle(proj)}</span>
+        <span className="text-2xs text-text-muted">{proj.sessions.length}</span>
         <button
-          onClick={(e) => { e.stopPropagation(); hidden ? unhideProject(proj.id) : hideProject(proj.id) }}
+          onClick={(e) => { e.stopPropagation(); if (hidden) unhideProject(proj.id); else hideProject(proj.id) }}
           title={hidden ? t(lang, 'Show', '显示') : t(lang, 'Hide', '隐藏')}
-          className="text-xs text-text-muted opacity-0 group-hover:opacity-100 hover:text-text transition-opacity px-1"
+          aria-label={hidden ? t(lang, 'Show', '显示') : t(lang, 'Hide', '隐藏')}
+          className="text-text-muted opacity-0 group-hover:opacity-100 hover:text-text transition-opacity px-1 flex items-center"
         >
-          {hidden ? '👁' : '🙈'}
+          {hidden ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
         </button>
       </div>
       {expandedProject === proj.id && (
         <div className="ml-6 border-l border-border">
           {sessions.map((s) => (
             <div key={s.id} onClick={() => handleSessionClick(s, proj.id)}
-              className={`px-3 py-1.5 cursor-pointer text-xs transition-colors hover:bg-surface-raised truncate ${
-                selectedSession?.id === s.id ? 'text-blue-400 bg-blue-600/10' : 'text-text-muted'
+              className={`px-3 py-1.5 cursor-pointer text-xs transition-colors truncate ${
+                selectedSession?.id === s.id ? ROW_SELECTED : 'text-text-muted hover:bg-surface-raised/60 hover:text-text'
               }`}>
               {s.firstMessage?.slice(0, 40) || s.id.slice(0, 8)}
             </div>
@@ -723,11 +751,11 @@ const App: React.FC = () => {
   )
 
   return (
-    <div className="flex flex-col h-screen bg-surface text-text">
+    <div className="app-canvas flex flex-col h-screen text-text">
       <CustomTitleBar />
       <div ref={columnsRef} className="flex flex-1 min-h-0">
         {/* Column 1: Project Tree + Sessions */}
-        <div style={{ width: col1Width, minWidth: 160 }} className="shrink-0 bg-surface-sidebar border-border flex flex-col">
+        <div style={{ width: col1Width, minWidth: 160 }} className="glass shrink-0 border-border flex flex-col">
           <div className="p-3 border-b border-border" style={{ WebkitAppRegion: 'drag', paddingLeft: trafficLightPadding } as React.CSSProperties}>
             <h1 className="text-sm font-semibold text-text-secondary text-center">{t(lang, 'Working Directories', '工作目录')}</h1>
           </div>
@@ -737,14 +765,18 @@ const App: React.FC = () => {
               <>
                 <div
                   onClick={() => { setShowAbout(false); setGlobalSelected(!globalSelected); setSelectedProjectId(null); setSelectedFile(null); setSelectedSession(null); setLinkIndex(null); setGitStatus({}) }}
-                  className={`px-3 py-2 text-sm flex items-center gap-2 cursor-pointer transition-colors hover:bg-surface-raised ${
-                    globalSelected ? 'bg-blue-600/10' : ''
+                  className={`px-3 py-2 text-xs flex items-center gap-2 cursor-pointer transition-colors ${
+                    globalSelected ? ROW_SELECTED : ROW_IDLE
                   }`}
                 >
-                  <span className="text-xs text-text-muted">{globalSelected ? '▼' : '▶'}</span>
-                  <span className="text-xs">🌐</span>
-                  <span className="text-text-secondary font-medium truncate flex-1">{t(lang, 'Global', '全局')}</span>
-                  <span className="text-xs text-text-muted">{globalGroups.reduce((n, g) => n + g.files.length, 0)}</span>
+                  {globalSelected ? (
+                    <ChevronDown className="size-3 shrink-0 text-text-muted" />
+                  ) : (
+                    <ChevronRight className="size-3 shrink-0 text-text-muted" />
+                  )}
+                  <Globe className="size-3.5 shrink-0" />
+                  <span className="font-medium truncate flex-1">{t(lang, 'Global', '全局')}</span>
+                  <span className="text-2xs text-text-muted">{globalGroups.reduce((n, g) => n + g.files.length, 0)}</span>
                 </div>
                 <div className="mx-3 border-t border-border" />
               </>
@@ -756,7 +788,7 @@ const App: React.FC = () => {
             {/* Empty projects (conversations deleted) — grouped at the bottom */}
             {emptyProjects.length > 0 && (
               <>
-                <div className="px-3 pt-3 pb-1 text-[10px] text-text-muted uppercase tracking-wider">
+                <div className="px-3 pt-3 pb-1 text-2xs text-text-muted uppercase tracking-wider">
                   {t(lang, 'Empty / Deleted', '空项目 / 已删除')}
                 </div>
                 {emptyProjects.map(p => renderProjectItem(p))}
@@ -768,9 +800,9 @@ const App: React.FC = () => {
               <>
                 <div
                   onClick={() => setShowHidden(!showHidden)}
-                  className="px-3 pt-3 pb-1 flex items-center gap-1 cursor-pointer text-[10px] text-text-muted uppercase tracking-wider hover:text-text-secondary transition-colors"
+                  className="px-3 pt-3 pb-1 flex items-center gap-1 cursor-pointer text-2xs text-text-muted uppercase tracking-wider hover:text-text transition-colors"
                 >
-                  <span>{showHidden ? '▼' : '▶'}</span>
+                  {showHidden ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
                   <span>{t(lang, `Hidden (${hiddenProjects.length})`, `已隐藏 (${hiddenProjects.length})`)}</span>
                 </div>
                 {showHidden && hiddenProjects.map(p => renderProjectItem(p, true))}
@@ -782,9 +814,9 @@ const App: React.FC = () => {
               <>
                 <div
                   onClick={() => setShowFiltered(!showFiltered)}
-                  className="px-3 pt-3 pb-1 flex items-center gap-1 cursor-pointer text-[10px] text-text-muted uppercase tracking-wider hover:text-text-secondary transition-colors"
+                  className="px-3 pt-3 pb-1 flex items-center gap-1 cursor-pointer text-2xs text-text-muted uppercase tracking-wider hover:text-text transition-colors"
                 >
-                  <span>{showFiltered ? '▼' : '▶'}</span>
+                  {showFiltered ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
                   <span>{t(lang, `Filtered (${filteredProjects.length})`, `已过滤 (${filteredProjects.length})`)}</span>
                 </div>
                 {showFiltered && filteredProjects.map(p => renderProjectItem(p, true))}
@@ -795,11 +827,12 @@ const App: React.FC = () => {
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => { setShowSettings(!showSettings); setShowAbout(false); setSelectedFile(null); setSelectedSession(null) }}
-                className={`flex-1 text-xs py-1.5 rounded transition-colors ${
-                  showSettings ? 'bg-blue-600/20 text-blue-400' : 'text-text-muted hover:text-text hover:bg-surface-raised'
+                className={`flex-1 flex items-center justify-center gap-1.5 text-xs py-1.5 rounded transition-colors ${
+                  showSettings ? 'bg-accent-subtle text-text' : 'text-text-muted hover:text-text hover:bg-surface-raised'
                 }`}
               >
-                {showSettings ? t(lang, '✕ Close', '✕ 关闭') : t(lang, '⚙ Settings', '⚙ 设置')}
+                {showSettings ? <X className="size-3.5" /> : <Settings className="size-3.5" />}
+                {showSettings ? t(lang, 'Close', '关闭') : t(lang, 'Settings', '设置')}
               </button>
               <button
                 onClick={() => void handleRefresh()}
@@ -820,7 +853,7 @@ const App: React.FC = () => {
               <button
                 onClick={toggleLang}
                 title={lang === 'zh' ? 'Switch to English' : '切换为中文'}
-                className="flex items-center justify-center size-7 rounded border border-border text-[10px] text-text-muted hover:text-text hover:bg-surface-raised transition-colors"
+                className="flex items-center justify-center size-7 rounded border border-border text-2xs text-text-muted hover:text-text hover:bg-surface-raised transition-colors"
               >
                 {lang === 'zh' ? 'EN' : '中'}
               </button>
@@ -831,11 +864,11 @@ const App: React.FC = () => {
         {/* Resize handle 1 */}
         <div
           onMouseDown={startResize('col1')}
-          className="w-1 shrink-0 cursor-col-resize hover:bg-blue-500/50 transition-colors bg-transparent"
+          className="w-1 shrink-0 cursor-col-resize hover:bg-accent/50 transition-colors bg-transparent"
         />
 
         {/* Column 2: File Tree */}
-        <div style={{ width: col2Width, minWidth: 160 }} className="shrink-0 bg-surface-sidebar/50 border-r border-border flex flex-col">
+        <div style={{ width: col2Width, minWidth: 160 }} className="glass shrink-0 border-r border-border flex flex-col">
           <div className="p-3 border-b border-border" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
             <h2 className="text-sm font-medium text-text-secondary text-center">
               {selectedProjectPath ? selectedProjectPath.split(/[\\/]/).pop() : t(lang, 'Memory Files', '记忆文件')}
@@ -845,24 +878,24 @@ const App: React.FC = () => {
           {showSettings && (
             <div className="shrink-0 border-b border-border py-1.5">
               {[
-                { key: 'theme', icon: '🎨', en: 'Theme', zh: '主题' },
-                { key: 'lang', icon: '🌐', en: 'Language', zh: '语言' },
-                { key: 'filter', icon: '🔍', en: 'Filter', zh: '过滤' },
-                { key: 'about', icon: 'ℹ️', en: 'About', zh: '关于' },
-              ].map((s) => (
+                { key: 'theme', Icon: Palette, en: 'Theme', zh: '主题' },
+                { key: 'lang', Icon: Languages, en: 'Language', zh: '语言' },
+                { key: 'filter', Icon: Search, en: 'Filter', zh: '过滤' },
+                { key: 'about', Icon: Info, en: 'About', zh: '关于' },
+              ].map(({ key, Icon, en, zh }) => (
                 <button
-                  key={s.key}
+                  key={key}
                   onClick={() => {
                     setShowSettings(true)
                     setShowAbout(false)
                     setTimeout(() => {
-                      document.getElementById(`setting-${s.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                      document.getElementById(`setting-${key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
                     }, 50)
                   }}
-                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-muted hover:text-text hover:bg-surface-raised transition-colors"
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-text-muted hover:text-text hover:bg-surface-raised/60 transition-colors"
                 >
-                  <span>{s.icon}</span>
-                  <span>{t(lang, s.en, s.zh)}</span>
+                  <Icon className="size-3.5 shrink-0" />
+                  <span>{t(lang, en, zh)}</span>
                 </button>
               ))}
             </div>
@@ -877,24 +910,27 @@ const App: React.FC = () => {
                     <div key={group.type}>
                       <div
                         onClick={() => hasFiles && toggleGlobalGroup(group.type)}
-                        className={`px-3 py-1.5 flex items-center gap-2 text-xs cursor-pointer transition-colors hover:bg-surface-raised ${!hasFiles ? 'opacity-40' : ''}`}
+                        className={`px-3 py-1.5 flex items-center gap-2 text-xs cursor-pointer transition-colors hover:bg-surface-raised/60 ${!hasFiles ? 'opacity-40' : ''}`}
                       >
-                        <span className="text-text-muted text-[10px]">{hasFiles ? (group.expanded ? '▼' : '▶') : '  '}</span>
-                        <span>{group.icon}</span>
+                        <span className="text-text-muted shrink-0 flex items-center">
+                          {hasFiles
+                            ? (group.expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />)
+                            : <span className="size-3" />}
+                        </span>
+                        <GroupIcon type={group.type} color={group.color} />
                         <span style={{ color: group.color }} className="font-semibold uppercase tracking-wide">{localizeGroup(group, lang).label}</span>
-                        <span className="text-text-muted ml-auto">{group.files.length}</span>
+                        <span className="text-2xs text-text-muted ml-auto">{group.files.length}</span>
                       </div>
                       {group.expanded && group.files.map((f) => (
                         <div key={f.path} onClick={() => void handleSelectFile(f)}
-                          className={`pl-10 pr-3 py-1.5 cursor-pointer text-xs transition-colors flex items-center gap-2 ${
-                            selectedFile?.path === f.path ? 'text-blue-400 bg-blue-600/10 border-r-2 border-blue-500'
-                              : 'text-text-secondary hover:bg-surface-raised hover:text-text'
+                          className={`pl-9 pr-3 py-2 cursor-pointer text-xs transition-colors flex items-center gap-2 ${
+                            selectedFile?.path === f.path ? ROW_SELECTED : ROW_IDLE
                           }`}
                         >
-                          <span className="text-text-muted shrink-0">📄</span>
+                          <FileText className="size-3.5 shrink-0 text-text-muted" />
                           <GitStatusIcon status={gitStatus[f.path]} lang={lang} />
                           <span className="font-mono truncate">{f.path.split(/[\\/]/).pop()}</span>
-                          {f.tokens > 0 && <span className="text-text-muted shrink-0 ml-auto">{formatTokens(f.tokens)}</span>}
+                          {f.tokens > 0 && <span className="text-2xs text-text-muted shrink-0 ml-auto">{formatTokens(f.tokens)}</span>}
                         </div>
                       ))}
                     </div>
@@ -908,7 +944,7 @@ const App: React.FC = () => {
               <div className="p-4 text-sm text-text-muted">{t(lang, 'Select a project or Global', '选择一个项目或全局')}</div>
             ) : !selectedProjectId ? null : loadingFiles ? (
               <div className="flex justify-center py-8">
-                <div className="animate-spin size-4 border-2 border-blue-500 border-t-transparent rounded-full" />
+                <div className="animate-spin size-4 border-2 border-accent border-t-transparent rounded-full" />
               </div>
             ) : (
               <div className="py-1">
@@ -918,18 +954,20 @@ const App: React.FC = () => {
                     <div key={group.type}>
                       <div
                         onClick={() => hasFiles && toggleGroup(group.type)}
-                        className={`px-3 py-1.5 flex items-center gap-2 text-xs cursor-pointer transition-colors hover:bg-surface-raised/50 ${
+                        className={`px-3 py-1.5 flex items-center gap-2 text-xs cursor-pointer transition-colors hover:bg-surface-raised/60 ${
                           !hasFiles ? 'opacity-40' : ''
                         }`}
                       >
-                        <span className="text-text-muted text-[10px]">
-                          {hasFiles ? (group.expanded ? '▼' : '▶') : '  '}
+                        <span className="text-text-muted shrink-0 flex items-center">
+                          {hasFiles
+                            ? (group.expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />)
+                            : <span className="size-3" />}
                         </span>
-                        <span>{group.icon}</span>
+                        <GroupIcon type={group.type} color={group.color} />
                         <span style={{ color: group.color }} className="font-semibold uppercase tracking-wide">
                           {localizeGroup(group, lang).label}
                         </span>
-                        <span className="text-text-muted ml-auto">{group.files.length}</span>
+                        <span className="text-2xs text-text-muted ml-auto">{group.files.length}</span>
                       </div>
                       {group.expanded && renderGroupFiles(group)}
                     </div>
@@ -943,7 +981,7 @@ const App: React.FC = () => {
         {/* Resize handle 2 */}
         <div
           onMouseDown={startResize('col2')}
-          className="w-1 shrink-0 cursor-col-resize hover:bg-blue-500/50 transition-colors bg-transparent"
+          className="w-1 shrink-0 cursor-col-resize hover:bg-accent/50 transition-colors bg-transparent"
         />
 
         {/* Column 3: Content Viewer */}
@@ -953,15 +991,55 @@ const App: React.FC = () => {
               <div className="max-w-xl mx-auto space-y-4">
                 <h2 className="text-sm font-semibold text-text">{t(lang, 'Settings', '设置')}</h2>
 
-                {/* Theme */}
+                {/* Theme — mode + accent colorway */}
                 <section id="setting-theme" className="bg-surface-sidebar rounded border border-border p-4">
-                  <h3 className="text-xs font-semibold text-text mb-2">{t(lang, 'Theme', '主题')}</h3>
-                  <button
-                    onClick={toggleTheme}
-                    className="text-xs px-3 py-1.5 rounded border border-border text-text-secondary hover:text-text hover:bg-surface-raised transition-colors"
-                  >
-                    {isLight ? t(lang, '☀ Light', '☀ 亮色') : t(lang, '🌙 Dark', '🌙 暗色')}
-                  </button>
+                  <h3 className="text-xs font-semibold text-text mb-3">{t(lang, 'Theme', '主题')}</h3>
+
+                  <div className="text-2xs uppercase tracking-wider text-text-muted mb-1.5">
+                    {t(lang, 'Appearance', '外观')}
+                  </div>
+                  <div className="inline-flex rounded border border-border p-0.5 mb-4">
+                    {([
+                      { light: false, Icon: Moon, en: 'Dark', zh: '暗色' },
+                      { light: true, Icon: Sun, en: 'Light', zh: '亮色' },
+                    ] as const).map(({ light, Icon, en, zh }) => (
+                      <button
+                        key={en}
+                        onClick={() => setTheme(light)}
+                        aria-pressed={isLight === light}
+                        className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded transition-colors ${
+                          isLight === light ? 'bg-accent-subtle text-text' : 'text-text-muted hover:text-text'
+                        }`}
+                      >
+                        <Icon className="size-3.5" />
+                        {t(lang, en, zh)}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="text-2xs uppercase tracking-wider text-text-muted mb-2">
+                    {t(lang, 'Accent Color', '强调色')}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {COLORWAYS.map((c) => (
+                      <button
+                        key={c}
+                        onClick={() => setColorway(c)}
+                        aria-pressed={colorway === c}
+                        className={`flex items-center gap-2 text-xs px-2.5 py-1.5 rounded border transition-colors ${
+                          colorway === c
+                            ? 'border-accent text-text bg-accent-subtle'
+                            : 'border-border text-text-secondary hover:text-text hover:bg-surface-raised'
+                        }`}
+                      >
+                        <span
+                          className="size-3 rounded-full shrink-0"
+                          style={{ background: COLORWAY_SWATCHES[c] }}
+                        />
+                        {COLORWAY_LABELS[c]}
+                      </button>
+                    ))}
+                  </div>
                 </section>
 
                 {/* Language */}
@@ -978,7 +1056,7 @@ const App: React.FC = () => {
                 {/* Auto-filter rules */}
                 <section id="setting-filter" className="bg-surface-sidebar rounded border border-border p-4">
                   <h3 className="text-xs font-semibold text-text mb-1">{t(lang, 'Auto-filter Rules', '自动过滤规则')}</h3>
-                  <p className="text-[10px] text-text-muted mb-2">
+                  <p className="text-2xs text-text-muted mb-2">
                     {lang === 'zh'
                       ? '按文件夹名称前缀匹配，匹配的文件夹自动归入"已过滤"分组。例如输入 vibe-cli- 会过滤所有以它开头的临时目录。'
                       : 'Prefix-match on folder name; matched folders are grouped as "Filtered". E.g. vibe-cli- filters all temp dirs starting with it.'}
@@ -989,11 +1067,11 @@ const App: React.FC = () => {
                       onChange={(e) => setFilterInput(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') { addFilterRule(filterInput); setFilterInput('') } }}
                       placeholder="vibe-cli-"
-                      className="flex-1 text-xs px-2 py-1.5 rounded border border-border bg-surface text-text outline-none focus:border-blue-500"
+                      className="flex-1 text-xs px-2 py-1.5 rounded border border-border bg-surface text-text outline-none focus:border-accent"
                     />
                     <button
                       onClick={() => { addFilterRule(filterInput); setFilterInput('') }}
-                      className="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 text-white"
+                      className="text-xs px-3 py-1.5 rounded bg-accent text-accent-fg hover:opacity-90 transition-opacity"
                     >
                       {t(lang, 'Add', '添加')}
                     </button>
@@ -1006,8 +1084,9 @@ const App: React.FC = () => {
                           <span className="text-text-muted flex-1">→ {projects.filter(p => projectTitle(p).startsWith(rule)).length} {t(lang, 'projects', '个项目')}</span>
                           <button
                             onClick={() => removeFilterRule(rule)}
-                            className="text-text-muted hover:text-red-400 px-1"
-                          >✕</button>
+                            aria-label={t(lang, 'Remove', '移除')}
+                            className="text-text-muted hover:text-red-400 px-1 flex items-center"
+                          ><X className="size-3.5" /></button>
                         </div>
                       ))}
                     </div>
@@ -1034,16 +1113,16 @@ const App: React.FC = () => {
                       return (
                         <div key={g.type} className="bg-surface rounded border border-border p-3">
                           <div className="flex items-center gap-2 mb-1.5">
-                            <span className="text-base">{g.icon}</span>
+                            <GroupIcon type={g.type} color={g.color} className="size-4 shrink-0" />
                             <span style={{ color: g.color }} className="text-sm font-semibold uppercase tracking-wide">{loc.label}</span>
                           </div>
                           <p className="text-xs text-text-secondary leading-relaxed mb-1">{loc.desc}</p>
-                          <p className="text-[10px] text-text-muted font-mono mb-0.5">{loc.path}</p>
-                          <p className="text-[10px] text-text-muted">{loc.priority}</p>
+                          <p className="text-2xs text-text-muted font-mono mb-0.5">{loc.path}</p>
+                          <p className="text-2xs text-text-muted">{loc.priority}</p>
                         </div>
                       )
                     })}
-                    <div className="text-[10px] text-text-muted pt-2 border-t border-border">
+                    <div className="text-2xs text-text-muted pt-2 border-t border-border">
                       <p>{t(lang, 'CC Memory — Claude Code memory file manager', 'CC Memory — Claude Code 记忆文件管理器')}</p>
                       {appVersion && <p className="mt-0.5">v{appVersion}</p>}
                     </div>
@@ -1071,16 +1150,16 @@ const App: React.FC = () => {
                   return (
                     <div key={g.type} className="bg-surface-sidebar rounded border border-border p-4">
                       <div className="flex items-center gap-2 mb-2">
-                        <span className="text-base">{g.icon}</span>
+                        <GroupIcon type={g.type} color={g.color} className="size-4 shrink-0" />
                         <span style={{ color: g.color }} className="text-sm font-semibold uppercase tracking-wide">{loc.label}</span>
                       </div>
                       <p className="text-xs text-text-secondary leading-relaxed mb-1">{loc.desc}</p>
-                      <p className="text-[10px] text-text-muted font-mono mb-0.5">{loc.path}</p>
-                      <p className="text-[10px] text-text-muted">{loc.priority}</p>
+                      <p className="text-2xs text-text-muted font-mono mb-0.5">{loc.path}</p>
+                      <p className="text-2xs text-text-muted">{loc.priority}</p>
                     </div>
                   )
                 })}
-                <div className="text-[10px] text-text-muted pt-2 border-t border-border">
+                <div className="text-2xs text-text-muted pt-2 border-t border-border">
                   <p>{t(lang, 'CC Memory — Claude Code memory file manager', 'CC Memory — Claude Code 记忆文件管理器')}</p>
                   {appVersion && <p className="mt-0.5">v{appVersion}</p>}
                 </div>
@@ -1097,27 +1176,34 @@ const App: React.FC = () => {
                   <div className="border-b border-border">
                     <div
                       onClick={() => setRulesExpanded(!rulesExpanded)}
-                      className="px-4 py-1.5 flex items-center gap-2 cursor-pointer hover:bg-surface-raised/50 transition-colors select-none"
+                      className="px-4 py-2 flex items-center gap-2 cursor-pointer hover:bg-surface-raised/50 transition-colors select-none"
                     >
-                      <span className="text-[10px] text-text-muted">{rulesExpanded ? '▼' : '▶'}</span>
-                      <span>{def.icon}</span>
-                      <span style={{ color: def.color }} className="text-[10px] font-semibold uppercase tracking-wide">{loc.label}</span>
-                      <span className="text-[10px] text-text-muted">— {loc.desc.slice(0, 60)}…</span>
+                      {rulesExpanded ? (
+                        <ChevronDown className="size-3 shrink-0 text-text-muted" />
+                      ) : (
+                        <ChevronRight className="size-3 shrink-0 text-text-muted" />
+                      )}
+                      <GroupIcon type={def.type} color={def.color} />
+                      <span style={{ color: def.color }} className="text-2xs font-semibold uppercase tracking-wide">{loc.label}</span>
+                      <span className="text-2xs text-text-muted truncate">— {loc.desc.slice(0, 60)}…</span>
                     </div>
                     {rulesExpanded && (
                       <div className="px-4 pb-2 space-y-1">
-                        <p className="text-[10px] text-text-secondary leading-relaxed">{loc.desc}</p>
-                        <p className="text-[10px] text-text-muted font-mono">{loc.path}</p>
-                        <p className="text-[10px] text-text-muted">{loc.priority}</p>
+                        <p className="text-2xs text-text-secondary leading-relaxed">{loc.desc}</p>
+                        <p className="text-2xs text-text-muted font-mono">{loc.path}</p>
+                        <p className="text-2xs text-text-muted">{loc.priority}</p>
                         {selectedFileSources.length > 0 && (
                           <div className="flex items-center gap-1 flex-wrap pt-1">
-                            <span className="text-[10px] text-text-muted">🔗 {t(lang, 'Indexed by', '索引来源')}:</span>
+                            <span className="inline-flex items-center gap-1 text-2xs text-text-muted">
+                              <Link2 className="size-3" />
+                              {t(lang, 'Indexed by', '索引来源')}:
+                            </span>
                             {selectedFileSources.map(s => (
                               <button
                                 key={s.path}
                                 onClick={() => void openFile(s.path, s.line)}
                                 title={lang === 'zh' ? (s.line ? `跳转到第 ${s.line} 行` : '跳转到文件') : (s.line ? `Jump to line ${s.line}` : 'Jump to file')}
-                                className="text-[10px] px-1.5 py-0.5 rounded border border-border text-blue-400 hover:bg-surface-raised hover:text-blue-300 transition-colors"
+                                className="text-2xs px-1.5 py-0.5 rounded border border-border text-accent hover:bg-surface-raised transition-colors"
                               >
                                 {s.fileName}{s.line ? `:${s.line}` : ''}
                               </button>
@@ -1130,27 +1216,37 @@ const App: React.FC = () => {
                 )
               })()}
               {/* File path + actions + info */}
-              <div className="flex items-center justify-between px-4 py-1.5 border-b border-border bg-surface-sidebar/30"
+              <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface-sidebar/30"
                 style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
                 <div className="flex min-w-0 items-center gap-2 text-xs">
                   <span className="font-mono text-text-secondary truncate">{selectedFile.path.split(/[\\/]/).pop()}</span>
                   <GitStatusIcon status={gitStatus[selectedFile.path]} lang={lang} />
-                  <span className="text-text-muted text-[10px]">{shortenPath(selectedFile.path)}</span>
-                  {isDirty && <span className="text-yellow-500 text-[10px]">● 未保存</span>}
-                  {diskUpdated && <span className="text-yellow-500 text-[10px]">⚠ 磁盘已更新</span>}
-                  <span className="text-text-muted text-[10px]">| {editingContent.split('\n').length} lines · {new Blob([editingContent]).size.toLocaleString()} bytes · {formatTokens(Math.ceil(editingContent.length / 4))}</span>
+                  <span className="text-2xs text-text-muted">{shortenPath(selectedFile.path)}</span>
+                  {isDirty && (
+                    <span className="inline-flex items-center gap-1 text-2xs text-yellow-500">
+                      <Circle className="size-1.5 fill-current" />
+                      {t(lang, 'Unsaved', '未保存')}
+                    </span>
+                  )}
+                  {diskUpdated && (
+                    <span className="inline-flex items-center gap-1 text-2xs text-yellow-500">
+                      <AlertTriangle className="size-3" />
+                      {t(lang, 'Disk updated', '磁盘已更新')}
+                    </span>
+                  )}
+                  <span className="text-2xs text-text-muted">| {editingContent.split('\n').length} lines · {new Blob([editingContent]).size.toLocaleString()} bytes · {formatTokens(Math.ceil(editingContent.length / 4))}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
                   <button onClick={handleSave} disabled={isSaving || !isDirty}
-                    className={`text-xs px-3 py-1 rounded ${
-                      isDirty ? 'bg-green-600 hover:bg-green-500 text-white' : 'bg-surface-raised text-text-muted'
+                    className={`text-xs px-3 py-1 rounded transition-colors ${
+                      isDirty ? 'bg-accent text-accent-fg hover:opacity-90' : 'bg-surface-raised text-text-muted'
                     }`}>
-                    {isSaving ? '保存中...' : '保存'}
+                    {isSaving ? t(lang, 'Saving…', '保存中…') : t(lang, 'Save', '保存')}
                   </button>
                   {selectedFile.type === 'AutoMem' && (
                     <button onClick={handleDelete}
-                      className="text-xs px-3 py-1 bg-surface-raised hover:bg-red-900 text-text-secondary hover:text-red-400 rounded">
-                      删除
+                      className="text-xs px-3 py-1 bg-surface-raised hover:bg-red-900 text-text-secondary hover:text-red-400 rounded transition-colors">
+                      {t(lang, 'Delete', '删除')}
                     </button>
                   )}
                 </div>
@@ -1162,14 +1258,14 @@ const App: React.FC = () => {
               <div className="flex items-center px-4 py-2 border-b border-border bg-surface-sidebar"
                 style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
                 <div className="flex min-w-0 items-center gap-3 text-xs">
-                  <span className="text-text-muted">📋</span>
+                  <FileJson className="size-3.5 shrink-0 text-text-muted" />
                   <span className="truncate font-mono text-text-secondary">{selectedSession.id}.jsonl</span>
                   <span className="text-text-muted">{selectedSession.firstMessage?.slice(0, 50)}</span>
                 </div>
               </div>
               {loadingJsonl ? (
                 <div className="flex-1 flex items-center justify-center">
-                  <div className="animate-spin size-4 border-2 border-blue-500 border-t-transparent rounded-full" />
+                  <div className="animate-spin size-4 border-2 border-accent border-t-transparent rounded-full" />
                 </div>
               ) : jsonlContent ? (
                 <CodeMirrorEditor value={jsonlContent} onChange={() => {}} readOnly />

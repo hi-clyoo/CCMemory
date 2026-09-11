@@ -46,12 +46,16 @@
   </style>
   <script>
     // Flash prevention: Apply cached theme before React loads.
-    // Default is light; only an explicit 'dark' cache opts into dark.
+    // Dark is the default; an explicit 'light' cache opts into light.
+    // Colorway defaults to indigo via index.css :root when unset.
     (function() {
       try {
-        var theme = localStorage.getItem('cc-memory-theme-cache');
-        if (theme !== 'dark') {
+        if (localStorage.getItem('cc-memory-theme-cache') === 'light') {
           document.documentElement.classList.add('light');
+        }
+        var colorway = localStorage.getItem('cc-memory-colorway');
+        if (colorway) {
+          document.documentElement.setAttribute('data-colorway', colorway);
         }
       } catch(e) {}
     })();
