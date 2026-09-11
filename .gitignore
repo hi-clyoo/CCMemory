@@ -51,3 +51,6 @@ remotion/*release/
 win-unpacked/
 .gstack/
 .superpowers/
+
+# External tooling (independent git repo)
+PokeChat/
